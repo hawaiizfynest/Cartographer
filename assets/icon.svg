@@ -1,0 +1,73 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#18181b"/>
+      <stop offset="1" stop-color="#09090b"/>
+    </linearGradient>
+    <linearGradient id="cart" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#27272a"/>
+      <stop offset="1" stop-color="#1c1c1f"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded background -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)"/>
+  <rect x="8" y="8" width="496" height="496" rx="106" fill="none"
+        stroke="#3f3f46" stroke-width="3"/>
+
+  <!-- cartridge body -->
+  <g transform="translate(256 262)">
+    <!-- main shell -->
+    <path d="M -118 -150
+             L 118 -150
+             Q 138 -150 138 -130
+             L 138 130
+             Q 138 150 118 150
+             L -118 150
+             Q -138 150 -138 130
+             L -138 -96
+             Q -138 -104 -132 -110
+             L -84 -158
+             Q -78 -164 -70 -164
+             L -70 -150 Z"
+          fill="url(#cart)" stroke="#3f3f46" stroke-width="4"/>
+
+    <!-- notched top-left corner accent (classic cart cut) -->
+    <path d="M -138 -96 L -84 -150 L -70 -150 L -132 -110 Z" fill="#0e0e10"/>
+
+    <!-- label area -->
+    <rect x="-104" y="-118" width="208" height="150" rx="12"
+          fill="#0e0e10" stroke="#3f3f46" stroke-width="3"/>
+
+    <!-- compass rose on the label (the 'cartographer' motif) -->
+    <g transform="translate(0 -43)">
+      <circle r="52" fill="none" stroke="#3f3f46" stroke-width="3"/>
+      <circle r="52" fill="#111113"/>
+      <!-- 4-point star -->
+      <path d="M 0 -46 L 11 -11 L 46 0 L 11 11 L 0 46 L -11 11 L -46 0 L -11 -11 Z"
+            fill="url(#cyan)"/>
+      <!-- inner star highlight -->
+      <path d="M 0 -46 L 8 -8 L 0 0 L -11 11 L 0 46 L 11 11 Z" fill="#67e8f9"
+            opacity="0.55"/>
+      <circle r="6" fill="#0e0e10" stroke="#22d3ee" stroke-width="2.5"/>
+    </g>
+
+    <!-- contact pins at the bottom -->
+    <rect x="-92" y="70" width="184" height="62" rx="6" fill="#0e0e10"/>
+    <g fill="url(#cyan)">
+      <rect x="-84" y="80" width="12" height="42" rx="2"/>
+      <rect x="-64" y="80" width="12" height="42" rx="2"/>
+      <rect x="-44" y="80" width="12" height="42" rx="2"/>
+      <rect x="-24" y="80" width="12" height="42" rx="2"/>
+      <rect x="-4"  y="80" width="12" height="42" rx="2"/>
+      <rect x="16"  y="80" width="12" height="42" rx="2"/>
+      <rect x="36"  y="80" width="12" height="42" rx="2"/>
+      <rect x="56"  y="80" width="12" height="42" rx="2"/>
+      <rect x="72"  y="80" width="12" height="42" rx="2"/>
+    </g>
+  </g>
+</svg>

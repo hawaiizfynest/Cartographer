@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec.bak
+.venv/
+venv/
+.DS_Store
+*.gb
+*.gbc
+*.sav
+*.srm
