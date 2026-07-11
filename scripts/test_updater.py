@@ -201,6 +201,25 @@ def test_download_asset_rejects_empty_url():
         pass
 
 
+def test_version_matches_changelog_heading():
+    # The app version must equal the top "## vX.Y.Z" heading in CHANGELOG.md, so
+    # the source can't drift behind the release tag.
+    import cartographer
+    import re
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "CHANGELOG.md")
+    top = ""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            m = re.match(r"^##\s*v?(\d+\.\d+\.\d+)", line.strip())
+            if m:
+                top = m.group(1)
+                break
+    assert top, "no version heading found in CHANGELOG.md"
+    assert cartographer.__version__ == top, (
+        f"app version {cartographer.__version__} != changelog top {top}")
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

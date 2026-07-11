@@ -77,11 +77,22 @@ class DeviceWindow(QMainWindow):
                  f"set the voltage switch to match the cart, and click Connect.")
         self._build_menu()
 
+        self._operation_running = False
         # After the window is up: show What's New if we just updated, then do a
         # quiet background update check.
         from PyQt6.QtCore import QTimer
+        from . import settings
         QTimer.singleShot(200, self._maybe_show_whats_new)
-        QTimer.singleShot(1200, lambda: self.on_check_updates(manual=False))
+        if settings.get("check_updates_on_start"):
+            QTimer.singleShot(1200, lambda: self.on_check_updates(manual=False))
+
+        # Keep watching while the app stays open, so a release published
+        # mid-session gets noticed without a restart. Re-checks every 4 hours.
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(4 * 60 * 60 * 1000)  # 4 hours
+        self._update_timer.timeout.connect(
+            lambda: self.on_check_updates(manual=False))
+        self._update_timer.start()
 
     def _build_menu(self) -> None:
         from . import settings
@@ -255,6 +266,10 @@ class DeviceWindow(QMainWindow):
         from . import settings, updater
         from .update_dialogs import UpdateAvailableDialog
         import webbrowser
+        # Don't let an automatic check interrupt a running operation (a dump,
+        # a restore, a batch job). Manual checks always run.
+        if not manual and getattr(self, "_operation_running", False):
+            return
         self.log("Checking for updates\u2026")
         try:
             rel = updater.fetch_latest()
@@ -586,6 +601,7 @@ class DeviceWindow(QMainWindow):
         self.btn_cartadvice.setEnabled(True)  # offline-capable
 
     def _busy(self, busy: bool) -> None:
+        self._operation_running = busy
         for b in self.action_buttons:
             b.setEnabled(not busy)
         self.btn_patch.setEnabled(not busy)

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.5
+
+- The app version now comes straight from this changelog's top entry, so it can't
+  fall behind the release tag and trigger a false "update available" again.
+- The update check now also runs on a timer while the app is open, so a release
+  published mid-session gets noticed without restarting.
+
 ## v1.0.3
 
 - Apply IPS, BPS and UPS patches to a ROM. BPS and UPS check the base ROM's
