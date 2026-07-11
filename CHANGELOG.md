@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.2
+## v1.0.3
 
 - Apply IPS, BPS and UPS patches to a ROM. BPS and UPS check the base ROM's
   checksum first, so a wrong or trimmed ROM gets caught instead of turning into a
