@@ -176,6 +176,8 @@ def best_notes(version: str, github_notes: str) -> str:
         return section
     return (github_notes or "").strip()
 
+
+def current_executable() -> str:
     """Path to the currently running program.
 
     When frozen by PyInstaller this is the .exe/.app binary; otherwise it's the
@@ -187,6 +189,54 @@ def best_notes(version: str, github_notes: str) -> str:
 
 def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
+
+
+def download_asset(rel: ReleaseInfo, dest_dir: str, progress=None) -> str:
+    """Download the release asset to dest_dir with integrity checks.
+
+    Verifies Content-Length and (on Windows .exe) the MZ header. Retries on
+    failure. Returns the downloaded file path. Raises UpdateError otherwise.
+    """
+    if not rel.asset_url:
+        raise UpdateError("This release has no downloadable file for your "
+                          "platform. Opening the releases page instead.")
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, rel.asset_name or "update.bin")
+
+    last_err = None
+    for attempt in range(_RETRIES):
+        try:
+            req = urllib.request.Request(rel.asset_url,
+                                         headers={"User-Agent": _USER_AGENT})
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                total = int(resp.headers.get("Content-Length", "0") or 0)
+                got = 0
+                with open(dest, "wb") as f:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        got += len(chunk)
+                        if progress and total:
+                            progress(got, total)
+            # integrity: byte count must match the advertised size
+            if total and got != total:
+                raise UpdateError(
+                    f"Download incomplete ({got} of {total} bytes).")
+            # integrity: Windows executables must start with 'MZ'
+            if dest.lower().endswith(".exe"):
+                with open(dest, "rb") as f:
+                    if f.read(2) != b"MZ":
+                        raise UpdateError("Downloaded file is not a valid "
+                                          "Windows executable (bad header).")
+            return dest
+        except UpdateError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            time.sleep(1.5 * (attempt + 1))
+    raise UpdateError(f"Download failed after {_RETRIES} attempts: {last_err}")
 
 
 def apply_update_and_restart(downloaded: str) -> None:

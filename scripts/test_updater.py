@@ -178,6 +178,29 @@ def test_best_notes_prefers_changelog():
     assert result2 == "fallback github text"
 
 
+def test_public_api_present():
+    # These are the functions device_window.py calls. If a refactor drops one,
+    # the app breaks at runtime, so guard the whole surface here.
+    for name in ("fetch_latest", "download_asset", "current_executable",
+                 "is_frozen", "is_newer", "apply_update_and_restart",
+                 "can_self_replace", "changelog_section", "best_notes",
+                 "_pick_asset", "_spawn_windows_swapper", "_spawn_unix_swapper"):
+        fn = getattr(updater, name, None)
+        assert fn is not None, f"updater.{name} is missing"
+        assert callable(fn), f"updater.{name} is not callable"
+
+
+def test_download_asset_rejects_empty_url():
+    from cartographer.updater import ReleaseInfo
+    rel = ReleaseInfo(version="1.0.0", tag="v1.0.0", name="x", notes="",
+                      html_url="", asset_url="", asset_name="", asset_size=0)
+    try:
+        updater.download_asset(rel, "/tmp")
+        assert False, "should have raised on empty asset_url"
+    except updater.UpdateError:
+        pass
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
