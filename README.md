@@ -9,6 +9,10 @@ I built this because the software that shipped with my flasher was a dead end, a
 because I wanted a batteryless save patcher built right into the same tool instead
 of juggling three separate command-line programs every time.
 
+**Just want to use it?**
+[Download the latest release](https://github.com/HawaiizFynest/Cartographer/releases/latest)
+and run it. No install, no Python needed.
+
 ![Cartographer](assets/preview.png)
 
 ## What it does
@@ -56,37 +60,50 @@ Full credit to them, see the Thanks section below.
 
 ## Getting started
 
-You'll need Python 3.12 or newer.
+The easy way is to grab a build. Head to the
+[Releases page](https://github.com/HawaiizFynest/Cartographer/releases), download
+the file for your system from the latest release, and run it. There's nothing to
+install.
+
+- Windows: `Cartographer-windows.exe`
+- macOS: `Cartographer-macos.zip` (unzip it, then open Cartographer.app)
+- Linux: `Cartographer-linux` (mark it executable with `chmod +x`, then run it)
+
+Once you're in, set the voltage switch on your cart to match what you're reading
+before you plug it in. GBA sits at 3.3V, GB and GBC at 5V. On the v1.1 board the
+switch is physical and the software can't override it, so Cartographer warns you
+if it looks like nothing's seated for the current switch position. Then pick your
+COM port, hit Connect, and Read cart info. From there the buttons do what they
+say.
+
+Windows may throw a SmartScreen warning the first time, since the build isn't
+code-signed. Click "More info" then "Run anyway."
+
+### Running from source
+
+If you'd rather run the Python directly (or you're working on the code), you'll
+need Python 3.12 or newer:
 
 ```
 pip install -r requirements.txt
 python run.py
 ```
 
-Set the voltage switch on your cart to match what you're reading before you plug
-it in. GBA sits at 3.3V, GB and GBC at 5V. On the v1.1 board the switch is
-physical and the software can't override it, so Cartographer warns you if it
-looks like nothing's seated for the current switch position.
+### Building it yourself
 
-Then pick your COM port, hit Connect, and Read cart info. From there the buttons
-do what they say.
+You don't have to. The GitHub Actions workflow builds Windows, macOS and Linux
+binaries on every push, and grabs them from the Actions tab a few minutes later.
+Tag a commit `v1.0.1` (or whatever the next version is) and it publishes a Release
+with all three binaries attached.
 
-## Building a standalone exe
-
-The GitHub Actions workflow builds Windows, macOS and Linux binaries on every
-push, so you don't have to build anything yourself. Push from GitHub Desktop and
-grab the `.exe` from the Actions tab a few minutes later. Tag a commit `v1.0.1`
-(or whatever the next version is) and it also cuts a Release with the binaries
-attached.
-
-If you want to build locally:
+To build locally anyway:
 
 ```
 pip install pyinstaller
 pyinstaller --noconfirm Cartographer.spec
 ```
 
-The result is a single file in `dist/`.
+You'll get a single file in `dist/`.
 
 ## Checking for updates
 
