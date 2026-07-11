@@ -86,9 +86,23 @@ class DeviceWindow(QMainWindow):
     def _build_menu(self) -> None:
         from . import settings
         bar = self.menuBar()
+
+        tools_menu = bar.addMenu("Tools")
+        act_batch = tools_menu.addAction("Batch dump (multiple carts)\u2026")
+        act_batch.triggered.connect(self.on_batch_dump)
+        act_rom_tools = tools_menu.addAction("ROM tools (patches, cheats)\u2026")
+        act_rom_tools.triggered.connect(self.on_rom_tools)
+        act_library = tools_menu.addAction("Library\u2026")
+        act_library.triggered.connect(self.on_library)
+        tools_menu.addSeparator()
+        act_settings = tools_menu.addAction("Settings\u2026")
+        act_settings.triggered.connect(self.on_settings)
+
         help_menu = bar.addMenu("Help")
         act_update = help_menu.addAction("Check for updates\u2026")
         act_update.triggered.connect(lambda: self.on_check_updates(manual=True))
+        act_view_whatsnew = help_menu.addAction("What's new in this version\u2026")
+        act_view_whatsnew.triggered.connect(self.on_view_whats_new)
         self.act_whatsnew = help_menu.addAction("Show What's New after updates")
         self.act_whatsnew.setCheckable(True)
         self.act_whatsnew.setChecked(settings.show_whats_new())
@@ -96,6 +110,142 @@ class DeviceWindow(QMainWindow):
         help_menu.addSeparator()
         act_about = help_menu.addAction(f"About {__app_name__}")
         act_about.triggered.connect(self.on_about)
+
+    def on_view_whats_new(self) -> None:
+        from . import updater
+        from .update_dialogs import WhatsNewDialog
+        notes = updater.changelog_section(__version__)
+        if not notes:
+            notes = "See CHANGELOG.md in the project for the full history."
+        WhatsNewDialog(__version__, notes, parent=self).exec()
+
+    def on_rom_tools(self) -> None:
+        from .tools_window import ToolsDialog
+        ToolsDialog(self).exec()
+
+    def on_library(self) -> None:
+        from .library_window import LibraryDialog
+        LibraryDialog(self).exec()
+
+    def on_settings(self) -> None:
+        from .settings_window import SettingsDialog
+        SettingsDialog(self).exec()
+
+    def on_batch_dump(self) -> None:
+        from . import settings
+        if self.info is None:
+            QMessageBox.information(
+                self, __app_name__,
+                "Connect first, then insert your first cart and run Batch dump. "
+                "You'll be prompted to swap carts between each one.")
+            return
+        folder = settings.get("output_folder")
+        if not folder or not os.path.isdir(folder):
+            folder = QFileDialog.getExistingDirectory(
+                self, "Folder to save all dumps into")
+            if not folder:
+                return
+        self._batch_folder = folder
+        self._batch_count = 0
+        self.log(f"Batch dump into {folder}. Reading the current cart\u2026")
+        self._batch_step()
+
+    def _batch_step(self) -> None:
+        """Read info for the seated cart and dump its ROM + save, then ask for
+        the next cart."""
+        if not self._switch_ok():
+            return
+        try:
+            self.dev.set_mode("0")
+            mode = self.dev.request_value(gx.CART_MODE, timeout=0.6)
+        except Exception:  # noqa: BLE001
+            mode = 0
+        if mode == 0:
+            QMessageBox.information(self, __app_name__,
+                                    "No cart detected. Insert one and try Batch "
+                                    "dump again.")
+            return
+        self.info = gx.DeviceInfo(firmware=self.info.firmware,
+                                  pcb=self.info.pcb, cart_mode=mode)
+        self.on_read_info()
+
+        folder = self._batch_folder
+        is_gba = self._is_gba()
+        ext = ".gba" if is_gba else ".gb"
+        name = self._default_filename(ext)
+        rom_path = os.path.join(folder, name)
+
+        def job(progress, log, cancel):
+            if is_gba:
+                size = self.dev.detect_gba_rom_size(cancel=cancel)
+                with open(rom_path, "wb") as f:
+                    self.dev.read_gba_rom(f, size, progress=progress, log=log,
+                                          cancel=cancel)
+            else:
+                parsed = self.gb_parsed
+                size = (parsed.rom_pages * 0x4000) if parsed else 0x8000
+                with open(rom_path, "wb") as f:
+                    self.dev.read_gb_rom(f, size,
+                                         cart_type=parsed.cart_type_byte if parsed
+                                         else 0,
+                                         title=parsed.title if parsed else "",
+                                         progress=progress, log=log, cancel=cancel)
+            # verify + dump save alongside
+            try:
+                from . import verify, titles
+                rom = open(rom_path, "rb").read()
+                result = (verify.verify_gba(rom, known_db=titles._SHA1) if is_gba
+                          else verify.verify_gb(rom, known_db=titles._SHA1))
+                log(result.summary())
+            except Exception:  # noqa: BLE001
+                pass
+            self._save_alongside(folder, name, is_gba, log, progress, cancel)
+
+        self._batch_count += 1
+        self._start(job, f"Dumped {name}", after=self._batch_next_prompt)
+
+    def _save_alongside(self, folder, rom_name, is_gba, log, progress,
+                        cancel) -> None:
+        """Dump the cart's save next to its ROM, if it has one."""
+        import os as _os
+        base = _os.path.splitext(rom_name)[0]
+        save_path = _os.path.join(folder, base + ".sav")
+        try:
+            if is_gba:
+                kind = self.save_id if self.save_id in gx.SAVE_LAYOUT else \
+                    gx.save_kind_from_id(self.save_id)
+                if kind in gx.SAVE_LAYOUT:
+                    with open(save_path, "wb") as f:
+                        self.dev.read_gba_save(f, kind, progress=progress,
+                                               cancel=cancel)
+                    log(f"Saved {base}.sav")
+            else:
+                parsed = self.gb_parsed
+                if parsed and parsed.ram_size_byte in gbh.RAM_SIZES:
+                    ram = gbh.RAM_SIZES[parsed.ram_size_byte][2]
+                    if ram:
+                        with open(save_path, "wb") as f:
+                            self.dev.read_gb_ram(f, ram,
+                                                 cart_type=parsed.cart_type_byte,
+                                                 ram_size_code=parsed.ram_size_byte,
+                                                 progress=progress, cancel=cancel)
+                        log(f"Saved {base}.sav")
+        except Exception as exc:  # noqa: BLE001
+            log(f"(save dump skipped: {exc})")
+
+    def _batch_next_prompt(self) -> None:
+        ask = QMessageBox.question(
+            self, "Batch dump",
+            f"Dumped {self._batch_count} cart(s) so far.\n\n"
+            f"Swap in the next cart (matching the voltage switch), then click "
+            f"Yes to dump it. Click No to finish.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if ask == QMessageBox.StandardButton.Yes:
+            self._batch_step()
+        else:
+            self.log(f"Batch dump finished: {self._batch_count} cart(s) into "
+                     f"{self._batch_folder}.")
 
     def _toggle_whats_new(self, on: bool) -> None:
         from . import settings
@@ -129,7 +279,8 @@ class DeviceWindow(QMainWindow):
             return
 
         can_auto = updater.is_frozen() and updater.can_self_replace(rel.asset_name)
-        dlg = UpdateAvailableDialog(__version__, rel.tag, rel.notes, can_auto,
+        notes = updater.best_notes(rel.version, rel.notes)
+        dlg = UpdateAvailableDialog(__version__, rel.tag, notes, can_auto,
                                     parent=self)
         dlg.exec()
         choice = dlg.choice
@@ -192,7 +343,8 @@ class DeviceWindow(QMainWindow):
         if can_auto:
             # Remember, so the new version shows What's New on first launch.
             settings.set("pending_whats_new_version", rel.tag if rel else "")
-            settings.set("pending_whats_new_notes", rel.notes if rel else "")
+            settings.set("pending_whats_new_notes",
+                         updater.best_notes(rel.version, rel.notes) if rel else "")
             confirm = QMessageBox.question(
                 self, __app_name__,
                 f"Cartographer {rel.tag if rel else ''} is ready.\n\n"
@@ -627,9 +779,10 @@ class DeviceWindow(QMainWindow):
         else:
             self.log("Could not parse GB header - re-seat the cart and retry.")
 
-    def _start(self, fn, success_msg: str) -> None:
+    def _start(self, fn, success_msg: str, after=None) -> None:
         self._busy(True)
         self.bar.setValue(0)
+        self._after_done = after
         self.worker = OperationWorker(fn, success_msg=success_msg)
         self.worker.sig_progress.connect(self.on_progress)
         self.worker.sig_log.connect(self.log)
@@ -646,6 +799,10 @@ class DeviceWindow(QMainWindow):
             self.lbl_title.setText(exact)
             self.resolved_title = exact
             self._exact_title = ""
+        after = getattr(self, "_after_done", None)
+        self._after_done = None
+        if ok and after:
+            after()
 
     def on_cancel(self) -> None:
         if self.worker is not None:

@@ -456,7 +456,7 @@ class GBxCart:
 
         Non-destructive: this only enters and exits the chip's read-ID mode and
         never issues an erase or program command. A retail (mask ROM) cart
-        simply ignores the command writes and returns its normal ROM bytes.
+        ignores the command writes and returns its normal ROM bytes.
 
         Returns {'baseline': bytes, '<variant>': bytes, ...}. A variant whose
         result differs from the baseline is the command set the chip responds to.

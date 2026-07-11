@@ -133,7 +133,49 @@ def fetch_latest() -> ReleaseInfo:
         asset_url=url, asset_name=name, asset_size=size)
 
 
-def current_executable() -> str:
+def _bundled_changelog_path() -> str:
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return os.path.join(base, "CHANGELOG.md")
+    # source tree: repo root is two levels up from this file
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "CHANGELOG.md")
+
+
+def changelog_section(version: str) -> str:
+    """Return the plain-text notes for a version from the bundled CHANGELOG.md.
+
+    Matches a heading like '## v1.0.1' (with or without the leading 'v') and
+    returns everything up to the next '## ' heading. Empty string if not found.
+    """
+    ver = version.strip().lstrip("vV")
+    try:
+        text = open(_bundled_changelog_path(), encoding="utf-8").read()
+    except OSError:
+        return ""
+    lines = text.splitlines()
+    out = []
+    grabbing = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading = stripped[3:].strip().lstrip("vV")
+            if grabbing:
+                break
+            grabbing = (heading == ver)
+            continue
+        if grabbing:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def best_notes(version: str, github_notes: str) -> str:
+    """Prefer the hand-written changelog section; fall back to GitHub's notes."""
+    section = changelog_section(version)
+    if section:
+        return section
+    return (github_notes or "").strip()
+
     """Path to the currently running program.
 
     When frozen by PyInstaller this is the .exe/.app binary; otherwise it's the

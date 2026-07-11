@@ -37,12 +37,23 @@ and run it. No install, no Python needed.
   Treasure (USA).gba` instead of `cartridge.gba`.
 - Identifies the flash chip on a flash cart without writing anything to it, and
   tells you the chip, its size, and whether it's one the tooling knows how to
-  write. Unknown chips get reported honestly with their raw ID rather than a
-  guess.
+  write. Unknown chips get reported with their raw ID rather than a guess.
 - Tells you which flash cart a game needs. GBA flash carts are locked to one save
   type because the game checks the save chip's ID, so this saves you from buying
   the wrong one.
 - Patches a GBA ROM for batteryless saving, entirely offline, no device needed.
+- Applies ROM hack patches. Point it at a clean base ROM and an IPS, BPS or UPS
+  patch and it writes out the hacked ROM. BPS and UPS check the base ROM's
+  checksum so you'll know if you've got the wrong version, instead of ending up
+  with a broken game.
+- Bakes Game Boy Game Genie codes into a ROM. Each code is checked against the
+  ROM's existing byte and skipped if it doesn't match, so a wrong code can't
+  corrupt the file. GameShark codes get decoded for reference (they're runtime
+  RAM writes and can't be baked into a ROM).
+- Dumps a whole stack of carts in one sitting. Batch dump reads each cart's ROM
+  and save, verifies it, names the file, and prompts you to swap in the next one.
+- Keeps a library view of your dumps: what's verified good, and which files are
+  duplicates of each other by hash.
 
 ## The batteryless patcher
 
@@ -120,14 +131,18 @@ checked for a valid executable header before anything gets swapped. Running from
 source instead? It'll point you at GitHub Desktop, since that's how you update
 the code.
 
-After an update, a What's New window lists what changed on first launch. If you'd
-rather not see it, there's a checkbox on that window to turn it off, and you can
-flip it back on under Help.
+After an update, a What's New window shows what changed on first launch. You can
+also open it any time from Help > What's new in this version, and there's a
+checkbox to stop it appearing after future updates.
+
+The text in those windows comes from `CHANGELOG.md`. Add a new `## vX.Y.Z`
+section to that file before tagging a release, and the release notes and the
+in-app What's New window both pick it up automatically.
 
 ## What's not done yet
 
 - Flashing a ROM to a GBA cart. The reading, saving and patching all work; the
-  write path is the next big piece. It needs testing against a genuinely
+  write path is the next big piece. It needs testing against a real
   reflashable cart, since a retail mask-ROM cart physically can't be written.
 - The game database only has a few dozen titles seeded in it right now. Every
   dump you make gets remembered by hash, so exact names build up over time, but a

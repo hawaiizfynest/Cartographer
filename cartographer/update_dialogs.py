@@ -76,7 +76,7 @@ class UpdateAvailableDialog(QDialog):
         head.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(head)
 
-        sub = QLabel("Here's what's new in this version:")
+        sub = QLabel("What's new in this version:")
         v.addWidget(sub)
 
         body = QTextBrowser()

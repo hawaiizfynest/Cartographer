@@ -36,6 +36,10 @@ jobs:
         run: python scripts/test_cart_compat.py
       - name: Run updater tests
         run: python scripts/test_updater.py
+      - name: Run ROM patch tests
+        run: python scripts/test_rompatch.py
+      - name: Run cheat code tests
+        run: python scripts/test_cheats.py
 
   build:
     needs: test
@@ -123,11 +127,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Extract changelog for this version
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          echo "Looking for section: ## $VERSION"
+          # Pull the block under "## vX.Y.Z" up to the next "## " heading.
+          BODY=$(awk -v ver="## $VERSION" '
+            $0 == ver {grab=1; next}
+            grab && /^## / {exit}
+            grab {print}
+          ' CHANGELOG.md)
+          if [ -z "$BODY" ]; then
+            BODY="See CHANGELOG.md for details."
+          fi
+          # Expose multi-line output to the release step.
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "$BODY"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.body }}

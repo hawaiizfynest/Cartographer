@@ -30,6 +30,10 @@ _DEFAULTS = {
     "show_whats_new": True,     # pop the What's New window after an update
     "skip_version": "",         # a version tag the user chose to skip
     "last_seen_version": "",    # last version we showed What's New for
+    "output_folder": "",        # default folder for dumps ("" = ask each time)
+    "auto_verify": True,        # verify ROM dumps automatically
+    "check_updates_on_start": True,
+    "library_folder": "",       # folder the library view scans
 }
 
 
