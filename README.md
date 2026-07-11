@@ -1,13 +1,13 @@
 # Cartographer
 
 A desktop app for backing up, restoring and flashing Game Boy, Game Boy Color and
-Game Boy Advance cartridges. It talks to a GBxCart RW (or compatible clone, like
-the "Cyclone" board I have) over USB and gives you a point-and-click way to pull
-ROMs and saves off a cart, put saves back, and check that a dump came out clean.
+Game Boy Advance cartridges. It talks to a GBxCart RW (or a compatible clone like
+the "Cyclone" board) over USB and gives you a point-and-click way to pull ROMs and
+saves off a cart, put saves back, and check that a dump came out clean.
 
-I built this because the software that shipped with my flasher was a dead end, and
-because I wanted a batteryless save patcher built right into the same tool instead
-of juggling three separate command-line programs every time.
+The software that ships with a lot of these flashers is a dead end, and there was
+no single tool that also did batteryless save patching without dropping down to
+three separate command-line programs. Cartographer rolls all of it into one app.
 
 **Just want to use it?**
 [Download the latest release](https://github.com/HawaiizFynest/Cartographer/releases/latest)
@@ -51,12 +51,12 @@ no battery, so the save is gone the moment you power off. The batteryless patch
 redirects the game's save into SRAM and flushes it back to the ROM flash on write,
 so it survives without a battery.
 
-I did not write that patch from scratch. Cartographer bundles a port of
+That patch isn't original work here. Cartographer bundles a port of
 **metroid-maniac's** `gba-auto-batteryless-patcher`, which does the real work, and
-it chains through **bbsan2k's** `Flash1M_Repro_SRAM_Patcher` first for the SRAM
-step. I verified the whole chain produces byte-for-byte identical output to
-running both original tools by hand on my own Emerald ROM before I trusted it.
-Full credit to them, see the Thanks section below.
+chains through **bbsan2k's** `Flash1M_Repro_SRAM_Patcher` first for the SRAM step.
+The port was checked against both original tools to confirm it produces
+byte-for-byte identical output before it shipped. Full credit to them, see the
+Thanks section below.
 
 ## Getting started
 
@@ -127,9 +127,8 @@ flip it back on under Help.
 ## What's not done yet
 
 - Flashing a ROM to a GBA cart. The reading, saving and patching all work; the
-  write path is the next big piece and it's waiting on me getting a proper
-  reflashable cart to test against, since both of my current carts are retail
-  mask ROM and physically can't be written.
+  write path is the next big piece. It needs testing against a genuinely
+  reflashable cart, since a retail mask-ROM cart physically can't be written.
 - The game database only has a few dozen titles seeded in it right now. Every
   dump you make gets remembered by hash, so exact names build up over time, but a
   full No-Intro import is on the list.
@@ -145,8 +144,8 @@ This wouldn't exist without a lot of other people's work:
 - **bbsan2k** for the Flash1M repro SRAM patcher that handles the SRAM step.
 - **insideGadgets** for the GBxCart RW hardware and the serial protocol this
   whole app is built to speak.
-- **Lesserkuma** and the FlashGBX project, which was my reference for how title
-  and save-type resolution should work.
+- **Lesserkuma** and the FlashGBX project, the reference for how title and
+  save-type resolution should work.
 
 The original licenses for the patchers live in the `licenses/` folder.
 
