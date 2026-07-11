@@ -77,17 +77,33 @@ class DeviceWindow(QMainWindow):
                  f"set the voltage switch to match the cart, and click Connect.")
         self._build_menu()
 
+        # After the window is up: show What's New if we just updated, then do a
+        # quiet background update check.
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(200, self._maybe_show_whats_new)
+        QTimer.singleShot(1200, lambda: self.on_check_updates(manual=False))
+
     def _build_menu(self) -> None:
+        from . import settings
         bar = self.menuBar()
         help_menu = bar.addMenu("Help")
         act_update = help_menu.addAction("Check for updates\u2026")
         act_update.triggered.connect(lambda: self.on_check_updates(manual=True))
+        self.act_whatsnew = help_menu.addAction("Show What's New after updates")
+        self.act_whatsnew.setCheckable(True)
+        self.act_whatsnew.setChecked(settings.show_whats_new())
+        self.act_whatsnew.toggled.connect(self._toggle_whats_new)
         help_menu.addSeparator()
         act_about = help_menu.addAction(f"About {__app_name__}")
         act_about.triggered.connect(self.on_about)
 
+    def _toggle_whats_new(self, on: bool) -> None:
+        from . import settings
+        settings.set_show_whats_new(on)
+
     def on_check_updates(self, manual: bool = False) -> None:
-        from . import updater
+        from . import settings, updater
+        from .update_dialogs import UpdateAvailableDialog
         import webbrowser
         self.log("Checking for updates\u2026")
         try:
@@ -98,6 +114,7 @@ class DeviceWindow(QMainWindow):
                 QMessageBox.information(self, __app_name__,
                                         f"Couldn't check for updates:\n{exc}")
             return
+
         if not updater.is_newer(rel.version, __version__):
             self.log(f"You're up to date (latest is {rel.tag or 'unknown'}).")
             if manual:
@@ -106,19 +123,30 @@ class DeviceWindow(QMainWindow):
                     f"You're running the latest version ({__version__}).")
             return
 
-        notes = (rel.notes[:600] + "\u2026") if len(rel.notes) > 600 else rel.notes
-        ask = QMessageBox.question(
-            self, "Update available",
-            f"A new version is available: <b>{rel.tag}</b> "
-            f"(you have {__version__}).<br><br>"
-            f"{notes.replace(chr(10), '<br>') if notes else ''}<br><br>"
-            f"Download it now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes)
-        if ask != QMessageBox.StandardButton.Yes:
+        # Respect a previously-skipped version, unless the user asked manually.
+        if not manual and settings.skip_version() == rel.tag:
+            self.log(f"Update {rel.tag} is available but was skipped.")
             return
 
-        # If there's no platform asset, just open the releases page.
+        can_auto = updater.is_frozen() and updater.can_self_replace(rel.asset_name)
+        dlg = UpdateAvailableDialog(__version__, rel.tag, rel.notes, can_auto,
+                                    parent=self)
+        dlg.exec()
+        choice = dlg.choice
+
+        if choice == UpdateAvailableDialog.SKIP:
+            settings.set_skip_version(rel.tag)
+            self.log(f"Skipping {rel.tag}. You can still update from Help > "
+                     f"Check for updates.")
+            return
+        if choice != UpdateAvailableDialog.UPDATE:
+            self.log("Update postponed.")
+            return
+
+        # Clear any prior skip now that the user chose to update.
+        if settings.skip_version() == rel.tag:
+            settings.set_skip_version("")
+
         if not rel.asset_url:
             webbrowser.open(rel.html_url or
                             f"https://github.com/{updater.GITHUB_OWNER}/"
@@ -126,13 +154,18 @@ class DeviceWindow(QMainWindow):
             return
 
         import os
-        dest_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-        if not os.path.isdir(dest_dir):
+        dest_dir = (os.path.dirname(updater.current_executable())
+                    if can_auto else
+                    os.path.join(os.path.expanduser("~"), "Downloads"))
+        if not can_auto and not os.path.isdir(dest_dir):
             dest_dir = os.getcwd()
         self.log(f"Downloading {rel.asset_name}\u2026")
         self._busy(True)
+        self._pending_release = rel
+        self._pending_can_auto = can_auto
 
         def job(progress, log, cancel):
+            # Download to a temp name in the target dir so the swap is a fast move.
             path = updater.download_asset(rel, dest_dir, progress=progress)
             self._downloaded_update = path
 
@@ -146,14 +179,49 @@ class DeviceWindow(QMainWindow):
     def _on_update_downloaded(self, ok: bool, msg: str) -> None:
         self._busy(False)
         path = getattr(self, "_downloaded_update", "")
-        if ok and path:
-            self.log(f"\u2713 Update saved to {path}")
-            import os
+        rel = getattr(self, "_pending_release", None)
+        can_auto = getattr(self, "_pending_can_auto", False)
+        if not (ok and path):
+            self.log(f"\u2717 {msg}")
+            return
+        self.log(f"\u2713 Update downloaded to {path}")
+
+        from . import settings, updater
+        import os
+
+        if can_auto:
+            # Remember, so the new version shows What's New on first launch.
+            settings.set("pending_whats_new_version", rel.tag if rel else "")
+            settings.set("pending_whats_new_notes", rel.notes if rel else "")
+            confirm = QMessageBox.question(
+                self, __app_name__,
+                f"Cartographer {rel.tag if rel else ''} is ready.\n\n"
+                f"The app will close, install the new version, and reopen. "
+                f"Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if confirm != QMessageBox.StandardButton.Yes:
+                self.log("Install postponed. The download is ready for next time.")
+                return
+            try:
+                updater.apply_update_and_restart(path)
+            except updater.UpdateError as exc:
+                self.log(f"\u2717 Couldn't apply update automatically: {exc}")
+                QMessageBox.warning(self, __app_name__,
+                                    f"Couldn't apply the update automatically:\n"
+                                    f"{exc}\n\nThe download is at:\n{path}")
+                return
+            # Hand off to the swapper and quit so it can replace this exe.
+            from PyQt6.QtWidgets import QApplication
+            self.log("Closing to finish the update\u2026")
+            QApplication.instance().quit()
+        else:
+            # Archive/dmg build: open the folder for a manual swap.
             if QMessageBox.question(
                     self, __app_name__,
-                    f"Downloaded to:\n{path}\n\nOpen its folder now? "
-                    f"Close {__app_name__} and run the new version to finish "
-                    f"updating.") == QMessageBox.StandardButton.Yes:
+                    f"Downloaded to:\n{path}\n\nOpen its folder now? Close "
+                    f"Cartographer and run the new version to finish updating."
+                    ) == QMessageBox.StandardButton.Yes:
                 folder = os.path.dirname(path)
                 try:
                     if sys.platform.startswith("win"):
@@ -164,8 +232,26 @@ class DeviceWindow(QMainWindow):
                         os.system(f'xdg-open "{folder}"')
                 except Exception:  # noqa: BLE001
                     pass
-        else:
-            self.log(f"\u2717 {msg}")
+
+    def _maybe_show_whats_new(self) -> None:
+        """On first launch after an update, show the What's New window once."""
+        from . import settings
+        from .update_dialogs import WhatsNewDialog
+        pending = settings.get("pending_whats_new_version")
+        if not pending:
+            return
+        # Only show if it matches the version we're now actually running, and the
+        # user hasn't silenced it.
+        if pending == __version__ and settings.show_whats_new():
+            notes = settings.get("pending_whats_new_notes") or ""
+            dlg = WhatsNewDialog(__version__, notes, parent=self)
+            dlg.exec()
+            if dlg.silence_requested:
+                settings.set_show_whats_new(False)
+        # Clear the pending flag either way so it only shows once.
+        settings.set("pending_whats_new_version", "")
+        settings.set("pending_whats_new_notes", "")
+        settings.set("last_seen_version", __version__)
 
     def on_about(self) -> None:
         QMessageBox.about(

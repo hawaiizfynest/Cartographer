@@ -34,6 +34,8 @@ jobs:
         run: python scripts/test_verify.py
       - name: Run cart-compatibility tests
         run: python scripts/test_cart_compat.py
+      - name: Run updater tests
+        run: python scripts/test_updater.py
 
   build:
     needs: test
@@ -69,20 +71,32 @@ jobs:
       - name: Build
         run: pyinstaller --noconfirm Cartographer.spec
 
-      - name: Package macOS app
+      - name: Stage Windows binary
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p out
+          cp dist/Cartographer.exe out/Cartographer-windows.exe
+
+      - name: Stage Linux binary
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p out
+          cp dist/Cartographer out/Cartographer-linux
+          chmod +x out/Cartographer-linux
+
+      - name: Stage macOS app
         if: matrix.os == 'macos-latest'
         run: |
+          mkdir -p out
           cd dist
-          zip -r Cartographer-macos.zip Cartographer.app
+          zip -r ../out/Cartographer-macos.zip Cartographer.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            dist/Cartographer.exe
-            dist/Cartographer
-            dist/Cartographer-macos.zip
+          path: out/*
           if-no-files-found: ignore
 
   release:

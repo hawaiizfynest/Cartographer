@@ -90,11 +90,22 @@ The result is a single file in `dist/`.
 
 ## Checking for updates
 
-Help > Check for updates asks GitHub for the latest release, and if there's a
-newer one it offers to download it. The download is size-checked against what
-GitHub says it should be, and Windows builds are checked for a valid executable
-header before they're handed to you. It never swaps the running program out from
-under you, it just drops the new one in your Downloads folder for you to run.
+Cartographer checks GitHub for a newer release when it starts, and you can check
+any time from Help > Check for updates. When there's a new version it shows you
+the full list of changes first, so you can decide whether it's worth it. From
+there you can update now, be reminded later, or tick the box to skip that version
+for good.
+
+In the built app, choosing Update handles everything: it downloads the new build,
+closes Cartographer, swaps the old program for the new one, and reopens. The
+download gets size-checked against what GitHub reports, and Windows builds are
+checked for a valid executable header before anything gets swapped. Running from
+source instead? It'll point you at GitHub Desktop, since that's how you update
+the code.
+
+After an update, a What's New window lists what changed on first launch. If you'd
+rather not see it, there's a checkbox on that window to turn it off, and you can
+flip it back on under Help.
 
 ## What's not done yet
 

@@ -78,24 +78,31 @@ def _platform_hint() -> str:
 
 
 def _pick_asset(assets: list) -> tuple:
-    """Choose the asset that best matches this platform; fall back to the first."""
+    """Choose the asset that best matches this platform; fall back to the first.
+
+    Priority: an asset whose name contains the platform hint (e.g. 'windows',
+    'linux', 'macos') wins outright - that is how the release workflow names them.
+    Only if none match by name do we fall back to matching by file extension, and
+    finally to the first asset.
+    """
     hint = _platform_hint()
-    ext = {"windows": (".exe", ".zip"), "macos": (".dmg", ".zip"),
+    # 1. Best: the name explicitly carries the platform.
+    for a in assets:
+        if hint in a.get("name", "").lower():
+            return (a.get("browser_download_url", ""), a.get("name", ""),
+                    a.get("size", 0))
+    # 2. Otherwise match by a plausible extension for this platform.
+    ext = {"windows": (".exe",), "macos": (".dmg", ".zip", ".app"),
            "linux": (".appimage", ".tar.gz", ".zip")}[hint]
     for a in assets:
-        name = a.get("name", "").lower()
-        if hint in name and name.endswith(ext):
-            return a.get("browser_download_url", ""), a.get("name", ""), \
-                a.get("size", 0)
-    for a in assets:
-        name = a.get("name", "").lower()
-        if name.endswith(ext):
-            return a.get("browser_download_url", ""), a.get("name", ""), \
-                a.get("size", 0)
+        if a.get("name", "").lower().endswith(ext):
+            return (a.get("browser_download_url", ""), a.get("name", ""),
+                    a.get("size", 0))
+    # 3. Last resort.
     if assets:
         a = assets[0]
-        return a.get("browser_download_url", ""), a.get("name", ""), \
-            a.get("size", 0)
+        return (a.get("browser_download_url", ""), a.get("name", ""),
+                a.get("size", 0))
     return "", "", 0
 
 
@@ -126,8 +133,123 @@ def fetch_latest() -> ReleaseInfo:
         asset_url=url, asset_name=name, asset_size=size)
 
 
-def download_asset(rel: ReleaseInfo, dest_dir: str,
-                   progress=None) -> str:
+def current_executable() -> str:
+    """Path to the currently running program.
+
+    When frozen by PyInstaller this is the .exe/.app binary; otherwise it's the
+    Python interpreter running the scripts (self-replace only makes sense for a
+    frozen build).
+    """
+    return sys.executable
+
+
+def is_frozen() -> bool:
+    return getattr(sys, "frozen", False)
+
+
+def apply_update_and_restart(downloaded: str) -> None:
+    """Replace the running program with `downloaded`, then relaunch it.
+
+    A running executable can't overwrite itself while it's running, so this spawns
+    a small detached helper that waits for this process to exit, swaps the files,
+    and starts the new version. This function returns after launching the helper;
+    the caller should then quit the app immediately.
+
+    Only meaningful for a frozen (PyInstaller) build. Raises UpdateError if the
+    downloaded file isn't usable.
+    """
+    if not is_frozen():
+        raise UpdateError(
+            "Automatic replace only works in the built app. From source, pull the "
+            "new code with GitHub Desktop instead.")
+    target = current_executable()
+    if not os.path.exists(downloaded):
+        raise UpdateError("Downloaded file is missing.")
+
+    if sys.platform.startswith("win"):
+        _spawn_windows_swapper(downloaded, target)
+    elif sys.platform == "darwin":
+        _spawn_unix_swapper(downloaded, target, mac=True)
+    else:
+        _spawn_unix_swapper(downloaded, target, mac=False)
+
+
+def _spawn_windows_swapper(src: str, dst: str) -> None:
+    """Write a .bat that waits for the app to close, swaps the exe, relaunches."""
+    import subprocess
+    import tempfile
+
+    pid = os.getpid()
+    bat = os.path.join(tempfile.gettempdir(), f"cartographer_update_{pid}.bat")
+    # Wait for our PID to disappear, back up the old exe, move the new one in,
+    # relaunch, then delete ourselves.
+    script = f"""@echo off
+setlocal
+set "TARGET={dst}"
+set "SRC={src}"
+:waitloop
+tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL
+if not errorlevel 1 (
+    ping -n 2 127.0.0.1 >NUL
+    goto waitloop
+)
+if exist "%TARGET%.old" del /f /q "%TARGET%.old" >NUL 2>&1
+if exist "%TARGET%" move /y "%TARGET%" "%TARGET%.old" >NUL 2>&1
+move /y "%SRC%" "%TARGET%" >NUL 2>&1
+start "" "%TARGET%"
+del /f /q "%TARGET%.old" >NUL 2>&1
+del /f /q "%~f0" >NUL 2>&1
+"""
+    with open(bat, "w", encoding="ascii") as f:
+        f.write(script)
+    # Detached, no console window.
+    CREATE_NO_WINDOW = 0x08000000
+    DETACHED_PROCESS = 0x00000008
+    subprocess.Popen(["cmd", "/c", bat],
+                     creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
+                     close_fds=True)
+
+
+def _spawn_unix_swapper(src: str, dst: str, mac: bool) -> None:
+    """Write a shell script that waits for the app to exit, swaps, relaunches."""
+    import subprocess
+    import tempfile
+
+    pid = os.getpid()
+    sh = os.path.join(tempfile.gettempdir(), f"cartographer_update_{pid}.sh")
+    relaunch = (f'open "{dst}"' if mac else f'"{dst}" &')
+    # For a downloaded archive (.zip/.dmg) we can't move a single binary; in that
+    # case just open the download location. Here we handle the direct-binary case.
+    script = f"""#!/bin/sh
+while kill -0 {pid} 2>/dev/null; do sleep 0.5; done
+if [ -f "{dst}" ]; then mv -f "{dst}" "{dst}.old" 2>/dev/null; fi
+mv -f "{src}" "{dst}" 2>/dev/null
+chmod +x "{dst}" 2>/dev/null
+{relaunch}
+rm -f "{dst}.old" 2>/dev/null
+rm -f "$0" 2>/dev/null
+"""
+    with open(sh, "w", encoding="ascii") as f:
+        f.write(script)
+    os.chmod(sh, 0o755)
+    subprocess.Popen(["/bin/sh", sh], close_fds=True,
+                     start_new_session=True)
+
+
+def can_self_replace(asset_name: str) -> bool:
+    """True if the downloaded asset is a single binary we can swap in place.
+
+    A zipped/dmg release can't be swapped byte-for-byte, so those fall back to
+    'open the folder' behaviour.
+    """
+    name = (asset_name or "").lower()
+    if sys.platform.startswith("win"):
+        return name.endswith(".exe")
+    if sys.platform == "darwin":
+        return name.endswith(".app")   # rare; usually zipped
+    return not (name.endswith(".zip") or name.endswith(".tar.gz")
+                or name.endswith(".dmg"))
+
     """Download the release asset to dest_dir with integrity checks.
 
     Verifies Content-Length and (on Windows .exe) the MZ header. Retries on
