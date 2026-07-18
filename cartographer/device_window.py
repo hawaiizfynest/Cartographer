@@ -105,6 +105,9 @@ class DeviceWindow(QMainWindow):
         act_rom_tools.triggered.connect(self.on_rom_tools)
         act_library = tools_menu.addAction("Library\u2026")
         act_library.triggered.connect(self.on_library)
+        act_reverify = tools_menu.addAction(
+            "Re-verify a ROM or save against its receipt\u2026")
+        act_reverify.triggered.connect(self.on_reverify_report)
         tools_menu.addSeparator()
         act_settings = tools_menu.addAction("Settings\u2026")
         act_settings.triggered.connect(self.on_settings)
@@ -201,13 +204,21 @@ class DeviceWindow(QMainWindow):
                                          else 0,
                                          title=parsed.title if parsed else "",
                                          progress=progress, log=log, cancel=cancel)
-            # verify + dump save alongside
+            # verify + write the receipt + dump save alongside
             try:
                 from . import verify, titles
                 rom = open(rom_path, "rb").read()
                 result = (verify.verify_gba(rom, known_db=titles._SHA1) if is_gba
                           else verify.verify_gb(rom, known_db=titles._SHA1))
                 log(result.summary())
+                info = (titles.resolve_gba(self.gba_header, rom=rom) if is_gba
+                        else titles.resolve_gb(
+                            self.gb_parsed.title if self.gb_parsed else "",
+                            rom=rom))
+                self._write_dump_report(
+                    rom_path, rom, result, is_gba, log,
+                    full_title=info.full_title,
+                    game_code=info.game_code or self.game_code)
             except Exception:  # noqa: BLE001
                 pass
             self._save_alongside(folder, name, is_gba, log, progress, cancel)
@@ -243,6 +254,72 @@ class DeviceWindow(QMainWindow):
                         log(f"Saved {base}.sav")
         except Exception as exc:  # noqa: BLE001
             log(f"(save dump skipped: {exc})")
+
+    def _console_label(self, is_gba) -> str:
+        if is_gba:
+            return "Game Boy Advance"
+        parsed = self.gb_parsed
+        return "Game Boy Color" if (parsed and parsed.cgb) else "Game Boy"
+
+    def _save_type_label(self, is_gba) -> str:
+        if is_gba:
+            from . import cart_compat as cc
+            kind = self.save_id if self.save_id in gx.SAVE_LAYOUT else \
+                gx.save_kind_from_id(self.save_id)
+            return cc._SAVE_LABELS.get(kind, self.save_id or "")
+        parsed = self.gb_parsed
+        if not parsed:
+            return ""
+        if parsed.ram_size in ("None", "Unknown"):
+            return "no save RAM"
+        return f"{parsed.ram_size} RAM ({parsed.cart_type})"
+
+    def _write_dump_report(self, rom_path, rom, result, is_gba, log,
+                           full_title="", game_code="") -> None:
+        """Write the sidecar receipt (`<dump>.txt` + `<dump>.sha1`) next to a
+        finished dump, if the setting is on. Runs inside worker jobs; a report
+        failure must never take the dump down with it."""
+        from . import settings, verify
+        try:
+            if not settings.get("write_dump_report"):
+                return
+            import time as _time
+            meta = verify.DumpMeta(console=self._console_label(is_gba),
+                                   title=full_title,
+                                   game_code=game_code, rom_size=len(rom),
+                                   save_type=self._save_type_label(is_gba))
+            text = verify.build_report(
+                os.path.basename(rom_path), meta, result,
+                _time.strftime("%Y-%m-%d %H:%M:%S"), app_version=__version__)
+            report = verify.write_report(rom_path, text)
+            verify.write_sha1_file(rom_path, result.sha1)
+            log(f"Report written: {os.path.basename(report)} (+ .sha1)")
+        except Exception as exc:  # noqa: BLE001
+            log(f"(report skipped: {exc})")
+
+    def _write_restore_report(self, save_path, data, writeback, is_gba,
+                              log) -> None:
+        """Write the restore receipt (`<save>.restore.txt` + `<save>.sha1`)
+        next to the save file that was written to the cart. Same setting, same
+        rule: a receipt failure never takes the restore down with it."""
+        from . import settings, verify
+        try:
+            if not settings.get("write_dump_report"):
+                return
+            import time as _time
+            crc, sha1 = verify.hashes(data)
+            text = verify.build_restore_report(
+                os.path.basename(save_path), self._console_label(is_gba),
+                self._save_type_label(is_gba), len(data), crc, sha1,
+                writeback, _time.strftime("%Y-%m-%d %H:%M:%S"),
+                app_version=__version__)
+            report = verify.write_report(save_path, text,
+                                         suffix=".restore.txt")
+            verify.write_sha1_file(save_path, sha1)
+            log(f"Restore receipt written: {os.path.basename(report)} "
+                f"(+ .sha1)")
+        except Exception as exc:  # noqa: BLE001
+            log(f"(restore receipt skipped: {exc})")
 
     def _batch_next_prompt(self) -> None:
         ask = QMessageBox.question(
@@ -864,6 +941,10 @@ class DeviceWindow(QMainWindow):
                         self._exact_title = info.full_title
                     else:
                         titles.remember_dump(rom, info.full_title)
+                    self._write_dump_report(
+                        path, rom, result, True, log,
+                        full_title=info.full_title,
+                        game_code=info.game_code or self.game_code)
                 except Exception as exc:  # noqa: BLE001
                     log(f"  (verification skipped: {exc})")
             self._exact_title = ""
@@ -894,6 +975,8 @@ class DeviceWindow(QMainWindow):
                         self._exact_title = info.full_title
                     elif title:
                         titles.remember_dump(rom, title)
+                    self._write_dump_report(path, rom, result, False, log,
+                                            full_title=info.full_title)
                 except Exception as exc:  # noqa: BLE001
                     log(f"  (verification skipped: {exc})")
             self._exact_title = ""
@@ -1012,7 +1095,8 @@ class DeviceWindow(QMainWindow):
             import io as _io
             buf = _io.BytesIO()
             self.dev.read_gba_save(buf, kind, progress=progress, cancel=cancel)
-            self._verify_writeback(buf.getvalue(), data, kind, log)
+            self._verify_writeback(buf.getvalue(), data, kind, log,
+                                   save_path=path, is_gba=True)
 
         self._start(job, "Save restored.")
 
@@ -1057,15 +1141,21 @@ class DeviceWindow(QMainWindow):
             self.dev.read_gb_ram(buf, ram_bytes, cart_type=ctype,
                                  ram_size_code=rsize, progress=progress,
                                  cancel=cancel)
-            self._verify_writeback(buf.getvalue(), data, "GB RAM", log)
+            self._verify_writeback(buf.getvalue(), data, "GB RAM", log,
+                                   save_path=path, is_gba=False)
 
         self._start(job, "Save restored.")
 
     def _verify_writeback(self, read_back: bytes, written: bytes, kind: str,
-                          log) -> None:
+                          log, save_path: str = "", is_gba: bool = True
+                          ) -> None:
         from . import verify
         n = min(len(read_back), len(written))
         check = verify.compare_reads(written[:n], read_back[:n])
+        # Receipt first, verdict second: a failed write still gets a loud
+        # FAILED receipt on disk before this raises.
+        if save_path:
+            self._write_restore_report(save_path, written, check, is_gba, log)
         if check.passed:
             log(f"\u2713 Verified: the cartridge now matches the save file.")
         else:
@@ -1196,6 +1286,40 @@ class DeviceWindow(QMainWindow):
             self.log(f"  {mark} {c.name}" + (f" ({c.detail})" if c.detail else ""))
         self.log(f"  CRC32 {result.crc32}  SHA-1 {result.sha1}")
         self.log(result.summary())
+
+    def on_reverify_report(self) -> None:
+        """Re-check a ROM or save file against the receipt written when it was
+        dumped or restored. Offline; catches bit rot, truncation and edits."""
+        from . import verify
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick the ROM or save to re-verify", "",
+            "ROM or save (*.gba *.gb *.gbc *.sav *.srm);;All files (*)")
+        if not path:
+            return
+        report = ""
+        for candidate in (path + ".txt", path + ".restore.txt"):
+            if os.path.isfile(candidate):
+                report = candidate
+                break
+        if not report:
+            report, _ = QFileDialog.getOpenFileName(
+                self, "Pick its receipt", os.path.dirname(path),
+                "Receipt (*.txt);;All files (*)")
+            if not report:
+                return
+        check = verify.reverify_against_report(path, report)
+        mark = "\u2713" if check.passed else "\u2717"
+        self.log(f"{mark} re-verify {os.path.basename(path)}: {check.detail}")
+        if check.passed:
+            QMessageBox.information(
+                self, __app_name__,
+                f"Still good.\n\n{os.path.basename(path)} {check.detail}.")
+        else:
+            QMessageBox.warning(
+                self, __app_name__,
+                f"Mismatch.\n\n{check.detail}.\n\nIf the file was moved or "
+                "copied, the copy may be damaged. If it hasn't been touched, "
+                "the drive may be failing.")
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         if self.worker is not None and self.worker.isRunning():

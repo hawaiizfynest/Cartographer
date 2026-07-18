@@ -38,6 +38,11 @@ class SettingsDialog(QDialog):
         self.chk_verify.setChecked(bool(settings.get("auto_verify")))
         v.addWidget(self.chk_verify)
 
+        self.chk_report = QCheckBox("Write a verification report next to each "
+                                    "dump and restore")
+        self.chk_report.setChecked(bool(settings.get("write_dump_report")))
+        v.addWidget(self.chk_report)
+
         v.addSpacing(8)
         v.addWidget(QLabel("<b>Library</b>"))
         self.ed_lib = QLineEdit(settings.get("library_folder") or "")
@@ -79,6 +84,7 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         settings.set("output_folder", self.ed_out.text().strip())
         settings.set("auto_verify", self.chk_verify.isChecked())
+        settings.set("write_dump_report", self.chk_report.isChecked())
         settings.set("library_folder", self.ed_lib.text().strip())
         settings.set("check_updates_on_start", self.chk_updates.isChecked())
         settings.set_show_whats_new(self.chk_whatsnew.isChecked())

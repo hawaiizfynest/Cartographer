@@ -32,6 +32,7 @@ _DEFAULTS = {
     "last_seen_version": "",    # last version we showed What's New for
     "output_folder": "",        # default folder for dumps ("" = ask each time)
     "auto_verify": True,        # verify ROM dumps automatically
+    "write_dump_report": True,  # write a verification report next to each dump
     "check_updates_on_start": True,
     "library_folder": "",       # folder the library view scans
 }
@@ -48,9 +49,15 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
+    # Persist only values that differ from the defaults. Writing every key
+    # would pin today's defaults into the file, and a later change to a
+    # default would then never reach anyone who has already run the app.
+    _sentinel = object()
+    delta = {k: v for k, v in data.items()
+             if _DEFAULTS.get(k, _sentinel) != v}
     try:
         with open(_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=1)
+            json.dump(delta, f, indent=1)
     except OSError:
         pass
 

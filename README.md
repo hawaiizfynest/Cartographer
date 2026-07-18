@@ -27,6 +27,13 @@ and run it. No install, no Python needed.
   SHA-1 and tells you whether the dump matches a known-good release. A single bad
   byte in the middle of a 16 MB ROM gets caught by the hash even when the header
   still looks fine.
+- Writes a receipt next to each dump and restore. Dumps get a report with the
+  checksums, header checks, save type and verdict; restores record the file's
+  hashes and whether the read-back off the cart matched. A bare .sha1 file
+  sits alongside for standard tools. Tools > Re-verify a ROM or save against
+  its receipt rechecks the hashes later, so bit rot or a damaged copy shows up
+  before you need the file. Turn it off in Settings if you'd rather not have
+  the extra files.
 - Restores saves back to a cart and reads them straight back to confirm the write
   landed. This is what makes a battery swap safe: back up the save, change the
   dead battery, restore, done.

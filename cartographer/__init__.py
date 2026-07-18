@@ -25,7 +25,7 @@ __app_name__ = "Cartographer"
 # where the changelog can't be read (it should always match the changelog's top
 # entry anyway). CI still overwrites this string from the git tag at build time,
 # which stays consistent with reading the changelog.
-_FALLBACK_VERSION = "1.0.5"
+_FALLBACK_VERSION = "1.0.6"
 
 
 def _changelog_path() -> str:

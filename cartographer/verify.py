@@ -21,6 +21,8 @@ Written by LJ "HawaiizFynest" Eblacas
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import zlib
 from dataclasses import dataclass, field
 
@@ -168,3 +170,200 @@ def compare_reads(first: bytes, second: bytes) -> Check:
                 return Check("read-twice", False,
                              f"first mismatch at offset 0x{i:X}")
     return Check("read-twice", True, "both reads identical")
+
+
+# ---------------------------------------------------------------------------
+# Dump report ("receipt") - a plain-text sidecar written next to each dump so
+# the file carries its own re-checkable record of what it hashed to and whether
+# it verified on the day it was made. FlashGBX writes one for the same reason.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DumpMeta:
+    """Cartridge metadata for the report header. Empty fields are omitted."""
+    console: str = ""     # "Game Boy Advance", "Game Boy Color", "Game Boy"
+    title: str = ""       # resolved full title
+    game_code: str = ""   # GBA game code, e.g. "BPEE" (GB carts have none)
+    rom_size: int = 0     # dump size in bytes
+    save_type: str = ""   # human label, e.g. "Flash 1Mbit (128 KB)"
+
+
+_COL = 17  # label column width, matches "Header checksum: " with two spaces
+
+
+def _field(label: str, value: str) -> str:
+    return f"{label + ':':<{_COL}}{value}"
+
+
+def _size_human(n: int) -> str:
+    mb = 1024 * 1024
+    if n >= mb and n % mb == 0:
+        return f"{n // mb} MB ({n:,} bytes)"
+    if n >= 1024 and n % 1024 == 0:
+        return f"{n // 1024} KB ({n:,} bytes)"
+    return f"{n:,} bytes"
+
+
+def build_report(filename: str, meta: DumpMeta, result: VerifyResult,
+                 dumped_at: str, app_version: str = "",
+                 read_twice: Check | None = None) -> str:
+    """Render the report text. Pure string building - no disk, no clock - so
+    it stays unit-testable. `dumped_at` is a preformatted local timestamp."""
+    lines = ["Cartographer dump report",
+             "========================",
+             _field("File", filename),
+             _field("Dumped", f"{dumped_at} (local)")]
+    if app_version:
+        lines.append(_field("Cartographer", f"v{app_version}"))
+    lines.append("")
+
+    for label, value in ((("Console", meta.console)),
+                         ("Title", meta.title),
+                         ("Game code", meta.game_code),
+                         ("ROM size", _size_human(meta.rom_size)
+                          if meta.rom_size else ""),
+                         ("Save type", meta.save_type)):
+        if value:
+            lines.append(_field(label, value))
+    if lines[-1] != "":
+        lines.append("")
+
+    lines += ["Integrity", "---------"]
+    for c in result.checks:
+        verdict = "OK" if c.passed else "FAILED"
+        if c.detail and (not c.passed or "checksum" in c.name):
+            verdict += f" ({c.detail})"
+        lines.append(_field(c.name[:1].upper() + c.name[1:], verdict))
+    lines.append(_field("CRC32", result.crc32))
+    lines.append(_field("SHA-1", result.sha1))
+    lines.append("")
+
+    if result.known_good:
+        lines.append("Known-good match: YES - matches known-good "
+                     f"\"{result.known_title}\"")
+    else:
+        lines.append("Known-good match: NO - SHA-1 not in the known-good "
+                     "database")
+    if read_twice is not None:
+        verdict = "PASS" if read_twice.passed else "FAILED"
+        lines.append(f"Read-twice check: {verdict} ({read_twice.detail})")
+    lines.append("")
+
+    if not result.all_passed:
+        lines.append("Result: FAILED - this dump may be corrupt. Re-seat the "
+                     "cart, clean the")
+        lines.append("        contacts with IPA, and dump again.")
+    elif result.known_good:
+        lines.append("Result: VERIFIED GOOD")
+    else:
+        lines.append("Result: PASSED - header and logo are valid. SHA-1 not "
+                     "in the known-good")
+        lines.append("        database, so there is no reference to compare "
+                     "against.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_report(dump_path: str, text: str, suffix: str = ".txt") -> str:
+    """Write a report next to the file as `<file><suffix>` and return its
+    path. Dump receipts use the default `.txt`; restore receipts pass
+    `.restore.txt` so the two can never clobber each other."""
+    path = dump_path + suffix
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
+
+def build_restore_report(filename: str, console: str, save_type: str,
+                         save_size: int, crc32: str, sha1: str,
+                         writeback: Check | None, restored_at: str,
+                         app_version: str = "") -> str:
+    """Render the receipt for a save restore: what was written to the cart,
+    its hashes, and whether the read-back matched. Pure string building, same
+    as build_report, so it stays unit-testable."""
+    lines = ["Cartographer restore report",
+             "===========================",
+             _field("File", filename),
+             _field("Restored", f"{restored_at} (local)")]
+    if app_version:
+        lines.append(_field("Cartographer", f"v{app_version}"))
+    lines.append("")
+
+    for label, value in (("Console", console),
+                         ("Save type", save_type),
+                         ("Save size", _size_human(save_size)
+                          if save_size else "")):
+        if value:
+            lines.append(_field(label, value))
+    if lines[-1] != "":
+        lines.append("")
+
+    lines += ["Integrity", "---------",
+              _field("CRC32", crc32),
+              _field("SHA-1", sha1),
+              ""]
+
+    if writeback is not None:
+        verdict = "PASS" if writeback.passed else "FAILED"
+        lines.append(_field("Write verify", f"{verdict} ({writeback.detail})"))
+        lines.append("")
+
+    if writeback is not None and writeback.passed:
+        lines.append("Result: RESTORED AND VERIFIED - the cartridge save "
+                     "matches this file.")
+    elif writeback is None:
+        lines.append("Result: RESTORED (write not verified by readback)")
+    else:
+        lines.append("Result: FAILED - the cartridge may not hold this save. "
+                     "Re-seat the cart,")
+        lines.append("        then restore again.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_sha1_file(dump_path: str, sha1: str) -> str:
+    """Write `<dump>.sha1` in the classic sha1sum line format
+    (`<hash> *<filename>`), so standard tools can check the dump too."""
+    path = dump_path + ".sha1"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"{sha1} *{os.path.basename(dump_path)}\n")
+    return path
+
+
+_RE_SHA1 = re.compile(r"^SHA-1:\s+([0-9a-fA-F]{40})\s*$", re.MULTILINE)
+_RE_CRC32 = re.compile(r"^CRC32:\s+([0-9a-fA-F]{8})\s*$", re.MULTILINE)
+
+
+def reverify_against_report(dump_path: str,
+                            report_path: str | None = None) -> Check:
+    """Recompute the file's SHA-1 and CRC32 and compare them against the
+    hashes its report recorded. Catches bit rot, truncation and edits."""
+    report_path = report_path or (dump_path + ".txt")
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = f.read()
+    except OSError as exc:
+        return Check("re-verify", False, f"cannot read report: {exc}")
+
+    m_sha, m_crc = _RE_SHA1.search(report), _RE_CRC32.search(report)
+    if not m_sha and not m_crc:
+        return Check("re-verify", False,
+                     "report has no SHA-1 or CRC32 line to check against")
+    try:
+        with open(dump_path, "rb") as f:
+            data = f.read()
+    except OSError as exc:
+        return Check("re-verify", False, f"cannot read ROM: {exc}")
+
+    crc, sha1 = hashes(data)
+    if m_sha and m_sha.group(1).lower() != sha1:
+        return Check("re-verify", False,
+                     f"SHA-1 mismatch: file is {sha1}, report recorded "
+                     f"{m_sha.group(1).lower()} - the file has changed since "
+                     "it was dumped")
+    if m_crc and m_crc.group(1).lower() != crc:
+        return Check("re-verify", False,
+                     f"CRC32 mismatch: file is {crc}, report recorded "
+                     f"{m_crc.group(1).lower()}")
+    return Check("re-verify", True,
+                 "file still matches the hashes recorded in its report")

@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.0.6
+
+- Every ROM dump gets a receipt. A plain-text report lands next to the dump
+  with its checksums, header checks, save type and a clear verdict, so years
+  from now you can prove the file still matches the cart it came from. A bare
+  .sha1 file is written too, in the standard sha1sum format, for checking with
+  ordinary command-line tools. Turn the receipts off in Settings if you want
+  bare dump folders.
+- Save restores get a receipt of their own. Restoring a save already read the
+  data back off the cart to confirm the write landed; that result now goes on
+  record in a .restore.txt next to the save file, with the file's hashes and a
+  plain verdict. A restore that fails the read-back still writes its receipt,
+  marked FAILED, so there's a paper trail either way.
+- Tools > Re-verify a ROM or save against its receipt recomputes a file's
+  hashes and compares them to what the receipt recorded. Bit rot, truncation
+  and stray edits all get caught.
+- Batch dumps write a receipt per cart.
+- Settings only saves values you changed. Before this, the file pinned every
+  default at first run, so a changed default could never reach an existing
+  install.
+
 ## v1.0.5
 
 - The app version now comes straight from this changelog's top entry, so it can't

@@ -107,6 +107,154 @@ def test_compare_reads():
     assert "0x1F4" in c.detail          # offset 500 == 0x1F4
 
 
+def test_report_contains_hashes_and_metadata():
+    rom = _good_gba()
+    r = verify.verify_gba(rom)
+    meta = verify.DumpMeta(console="Game Boy Advance", title="Test Game",
+                           game_code="TSTE", rom_size=len(rom),
+                           save_type="SRAM/FRAM 256Kbit (32 KB)")
+    text = verify.build_report("Test Game.gba", meta, r,
+                               "2026-07-18 12:00:00", app_version="1.0.6")
+    assert r.sha1 in text
+    assert r.crc32 in text
+    assert "File:            Test Game.gba" in text
+    assert "Game Boy Advance" in text
+    assert "TSTE" in text
+    assert "1 KB (1,024 bytes)" in text          # _good_gba() is 0x400 bytes
+    assert "Result: PASSED" in text              # valid but not in any DB
+
+
+def test_report_failed_verify_is_loud():
+    rom = bytearray(_good_gba())
+    rom[0xBD] ^= 0xFF                            # break the header checksum
+    r = verify.verify_gba(bytes(rom))
+    text = verify.build_report("bad.gba", verify.DumpMeta(), r,
+                               "2026-07-18 12:00:00")
+    assert "Result: FAILED" in text
+    assert any(line.startswith("Header checksum: FAILED")
+               for line in text.splitlines())
+
+
+def test_report_known_good_verdict():
+    rom = _good_gba()
+    _crc, sha1 = verify.hashes(rom)
+    r = verify.verify_gba(rom, known_db={sha1: {"title": "Test Game (USA)"}})
+    text = verify.build_report("t.gba", verify.DumpMeta(), r, "x")
+    assert "Result: VERIFIED GOOD" in text
+    assert 'Known-good match: YES - matches known-good "Test Game (USA)"' \
+        in text
+
+
+def test_report_read_twice_line_only_when_given():
+    r = verify.verify_gba(_good_gba())
+    plain = verify.build_report("t.gba", verify.DumpMeta(), r, "x")
+    assert "Read-twice" not in plain
+    chk = verify.compare_reads(b"same", b"same")
+    text = verify.build_report("t.gba", verify.DumpMeta(), r, "x",
+                               read_twice=chk)
+    assert "Read-twice check: PASS (both reads identical)" in text
+
+
+def test_write_report_and_sha1_sidecars():
+    import tempfile
+    rom = _good_gba()
+    r = verify.verify_gba(rom)
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "t.gba")
+        with open(p, "wb") as f:
+            f.write(rom)
+        text = verify.build_report("t.gba", verify.DumpMeta(), r, "x")
+        rp = verify.write_report(p, text)
+        assert rp == p + ".txt"
+        with open(rp, encoding="utf-8") as f:
+            assert f.read() == text
+        sp = verify.write_sha1_file(p, r.sha1)
+        assert sp == p + ".sha1"
+        with open(sp, encoding="utf-8") as f:
+            assert f.read().strip() == f"{r.sha1} *t.gba"
+
+
+def test_reverify_passes_then_catches_mutation():
+    import tempfile
+    rom = _good_gba()
+    r = verify.verify_gba(rom)
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "t.gba")
+        with open(p, "wb") as f:
+            f.write(rom)
+        verify.write_report(p, verify.build_report("t.gba", verify.DumpMeta(),
+                                                   r, "x"))
+        assert verify.reverify_against_report(p).passed
+        mutated = bytearray(rom)
+        mutated[0x200] ^= 0x01                   # single-bit rot mid-file
+        with open(p, "wb") as f:
+            f.write(mutated)
+        check = verify.reverify_against_report(p)
+        assert not check.passed
+        assert "SHA-1" in check.detail
+
+
+def test_reverify_missing_report_fails_cleanly():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "nothing.gba")
+        with open(p, "wb") as f:
+            f.write(b"\x00" * 64)
+        check = verify.reverify_against_report(p)
+        assert not check.passed
+        assert "report" in check.detail
+
+
+def test_restore_report_verified():
+    data = bytes((i * 3 + 5) & 0xFF for i in range(32768))
+    crc, sha1 = verify.hashes(data)
+    wb = verify.compare_reads(data, data)
+    text = verify.build_restore_report(
+        "Emerald.sav", "Game Boy Advance", "Flash 1Mbit (128 KB)", len(data),
+        crc, sha1, wb, "2026-07-18 12:00:00", app_version="1.0.6")
+    assert sha1 in text
+    assert crc in text
+    assert "Write verify:    PASS (both reads identical)" in text
+    assert "Result: RESTORED AND VERIFIED" in text
+    assert "32 KB (32,768 bytes)" in text
+
+
+def test_restore_report_failed_writeback_is_loud():
+    data = bytes(range(256))
+    mangled = bytearray(data)
+    mangled[10] ^= 0xFF
+    crc, sha1 = verify.hashes(data)
+    wb = verify.compare_reads(data, bytes(mangled))
+    text = verify.build_restore_report(
+        "save.sav", "Game Boy", "8 KB RAM (MBC1+RAM+BATTERY)", len(data),
+        crc, sha1, wb, "2026-07-18 12:00:00")
+    assert "Result: FAILED" in text
+    assert any(line.startswith("Write verify:    FAILED")
+               for line in text.splitlines())
+
+
+def test_restore_receipt_reverify_roundtrip():
+    import tempfile
+    data = bytes((i * 11 + 2) & 0xFF for i in range(4096))
+    crc, sha1 = verify.hashes(data)
+    wb = verify.compare_reads(data, data)
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "game.sav")
+        with open(p, "wb") as f:
+            f.write(data)
+        text = verify.build_restore_report("game.sav", "Game Boy Advance",
+                                           "SRAM/FRAM 256Kbit (32 KB)",
+                                           len(data), crc, sha1, wb, "x")
+        rp = verify.write_report(p, text, suffix=".restore.txt")
+        assert rp == p + ".restore.txt"
+        assert verify.reverify_against_report(p, rp).passed
+        with open(p, "ab") as f:
+            f.write(b"\x00")               # truncation/append damage
+        check = verify.reverify_against_report(p, rp)
+        assert not check.passed
+        assert "SHA-1" in check.detail
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
