@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.15
+
+- ROM writes are meaningfully faster. About half the write time was a fixed
+  settle pause after every command, left conservative from the chip-identify
+  code where a missed command matters. During a write the app already confirms
+  each word landed by reading it back, so that pause can be much shorter with the
+  read-back and retry as the safety net. Writing now uses a shorter settle during
+  the program loop, cutting a large chunk off the total time, while identify keeps
+  the cautious timing it needs. If a word ever does not take at the faster pace,
+  the existing retry catches it, so reliability is unchanged.
+
 ## v1.0.14
 
 - Fixed ROM writes failing partway with a verify error. The program step sent

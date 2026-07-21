@@ -585,6 +585,7 @@ class GBxCart:
 
     def gba_flash_write_rom(self, data: bytes, erase_regions,
                             unlock_a1: int = 0xAAA, unlock_a2: int = 0x555,
+                            write_settle_s: float = 0.0002,
                             progress=None, log=None, cancel=None) -> tuple:
         """Write a full ROM to the flash cart, erasing and verifying as it goes.
 
@@ -596,6 +597,11 @@ class GBxCart:
 
         `erase_regions` is the CFI sector map: a sequence of (sector_size_bytes,
         sector_count). `data` is the ROM bytes. Assumes GBA mode and 5V are set.
+
+        `write_settle_s` is the per-command settle delay used during programming.
+        It is shorter than the identify-time delay because each word is confirmed
+        by read-back and retried if it does not take, so the read-back is the
+        safety net rather than a long fixed pause. This roughly halves write time.
 
         Returns (ok, message). ok is True only if the whole ROM wrote and every
         sector verified. On failure, message says exactly which sector and why.
@@ -630,6 +636,19 @@ class GBxCart:
         _log(f"Writing {len(data)} bytes across up to {len(sectors)} sectors. "
              f"This is slow (one word at a time); progress is per sector.")
 
+        # Use a shorter settle delay during the program loop; the per-word
+        # read-back and retry are the safety net. Restored in the finally below.
+        saved_settle = self.flash_settle_s
+        self.flash_settle_s = write_settle_s
+        try:
+            return self._write_rom_inner(data, sectors, unlock_a1, unlock_a2,
+                                         progress, _log, _cancelled)
+        finally:
+            self.flash_settle_s = saved_settle
+            self.gba_flash_reset()
+
+    def _write_rom_inner(self, data, sectors, unlock_a1, unlock_a2,
+                         progress, _log, _cancelled) -> tuple:
         written = 0
         for idx, (sec_addr, sec_size) in enumerate(sectors):
             if sec_addr >= len(data):
