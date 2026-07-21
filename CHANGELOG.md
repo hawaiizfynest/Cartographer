@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.1.0
+## v1.1.2
 
 - Fast ROM writing. Writing a ROM used to program one word at a time over the
   cable, which was reliable but slow (hours for a large game). The device
