@@ -62,6 +62,13 @@ GBA_WRITE_EEPROM = "p"
 GBA_WRITE_ONE_BYTE_SRAM = "o"
 GBA_FLASH_READ_ID = "i"
 GBA_FLASH_WRITE_BYTE = "b"
+# Firmware block-write commands: hand a raw data block to the device and it does
+# the per-word unlock-and-program internally (fast). 'f' is the plain AMD 256-byte
+# block; 't' is the same but for D0/D1-swapped carts. Which one a cart needs
+# depends on whether its CFI magic read as "QRY" (not swapped -> 'f') or "RQZ"
+# (swapped -> 't').
+GBA_FLASH_WRITE_256BYTE = "f"
+GBA_FLASH_WRITE_256BYTE_SWAPPED = "t"
 GBA_FLASH_WRITE_ATMEL = "a"
 GBA_FLASH_4K_SECTOR_ERASE = "s"
 GBA_FLASH_CART_WRITE_BYTE = "n"   # write a command byte to the GBA flash bus
@@ -582,6 +589,82 @@ class GBxCart:
                 _time.sleep(self.flash_poll_word_s)
         # One last check before giving up.
         return self._gba_read_bytes_at(byte_addr, 2) == want
+
+    def gba_flash_block_write_probe(self, block_command: str = "f",
+                                    test_block: bytes = b"",
+                                    log=None) -> tuple:
+        """Experiment: erase sector 0, write ONE block via the firmware block
+        command, read it back, and report whether it landed correctly.
+
+        This is a diagnostic, not the write feature. It answers one question: does
+        the firmware's fast block-write command program this specific chip
+        correctly? If the read-back matches, the block command works and a fast
+        write loop can be built on it. If it comes back wrong (garbled, swapped,
+        or unchanged), the command is not right for this chip.
+
+        Only sector 0 is touched. Assumes GBA mode and 5V are set. Returns
+        (ok, readback, message). ok is True only if the read-back equals the block
+        we wrote. On mismatch, `readback` is what the chip actually holds, so the
+        failure mode (e.g. byte-swapped vs unchanged) is visible.
+        """
+        def _log(msg: str) -> None:
+            if log:
+                log(msg)
+
+        if not test_block:
+            # A distinctive 256-byte pattern: byte i = (i*7 + 0x11) & 0xFF. No long
+            # runs of 0xFF, so it forces real programming and is easy to eyeball.
+            test_block = bytes(((i * 7 + 0x11) & 0xFF) for i in range(256))
+        block = test_block[:256].ljust(256, b"\x00")
+
+        # Erase sector 0 first (the block must be written to erased flash).
+        _log("Erasing sector 0 for the block-write test\u2026")
+        ok, _sample = self.gba_flash_erase_sector(0x0, log=None)
+        if not ok:
+            return False, b"", ("Sector 0 did not erase, so the block-write test "
+                                "cannot run. (This is the erase step, not the "
+                                "block write.)")
+
+        # Set the address to 0, then stream the block command + 256 bytes.
+        _log(f"Writing one 256-byte block with command '{block_command}'\u2026")
+        self.set_number(0x0 // 2, SET_START_ADDRESS)
+        self.write_block(block_command, block)
+
+        # Give the firmware a moment to program the block, then read it back.
+        import time as _time
+        _time.sleep(0.05)
+        self.gba_flash_reset()
+        readback = self._gba_read_bytes_at(0x0, 256)
+
+        if readback == block:
+            _log("  Block wrote and read back correct. The fast block-write "
+                 "command works on this chip.")
+            return True, readback, ("Block-write command "
+                                    f"'{block_command}' works: 256 bytes wrote "
+                                    f"and verified.")
+
+        # Diagnose the failure mode for the log.
+        if all(b == 0xFF for b in readback):
+            why = ("the block did not program at all (still erased 0xFF) - this "
+                   "command likely is not understood by the firmware for this "
+                   "chip")
+        else:
+            # Check if it looks D0/D1 swapped (a common repro-cart wrinkle).
+            def swap01(v):
+                b0 = (v & 1); b1 = (v >> 1) & 1
+                return (v & ~0b11) | (b1) | (b0 << 1)
+            swapped = bytes(swap01(b) for b in block)
+            if readback == swapped:
+                why = ("the data came back with D0/D1 swapped - this chip needs "
+                       "the swapped block command instead")
+            else:
+                nonmatch = next((i for i in range(256)
+                                 if readback[i] != block[i]), 0)
+                why = (f"the read-back differs starting at byte {nonmatch} "
+                       f"(got 0x{readback[nonmatch]:02X}, expected "
+                       f"0x{block[nonmatch]:02X})")
+        _log(f"  Block-write test FAILED: {why}.")
+        return False, readback, f"Block-write command '{block_command}' failed: {why}."
 
     def gba_flash_write_rom(self, data: bytes, erase_regions,
                             unlock_a1: int = 0xAAA, unlock_a2: int = 0x555,

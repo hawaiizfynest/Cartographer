@@ -601,6 +601,9 @@ class DeviceWindow(QMainWindow):
         self.btn_patch.clicked.connect(self.on_patch)
         self.btn_write_rom = QPushButton("Write ROM to flash cart\u2026")
         self.btn_write_rom.clicked.connect(self.on_write_rom)
+        self.btn_test_block = QPushButton(
+            "Test fast block write (experimental)\u2026")
+        self.btn_test_block.clicked.connect(self.on_test_block_write)
 
         grid.addWidget(self.btn_readinfo, 0, 0)
         grid.addWidget(self.btn_backup_rom, 0, 1)
@@ -611,17 +614,19 @@ class DeviceWindow(QMainWindow):
         grid.addWidget(self.btn_cartadvice, 3, 0)
         grid.addWidget(self.btn_patch, 3, 1)
         grid.addWidget(self.btn_write_rom, 4, 0, 1, 2)
+        grid.addWidget(self.btn_test_block, 5, 0, 1, 2)
 
         self.action_buttons = [
             self.btn_readinfo, self.btn_backup_rom, self.btn_backup_save,
             self.btn_restore_save, self.btn_flashid, self.btn_write_rom,
+            self.btn_test_block,
         ]
         hint = QLabel("Set the physical GBA/GBC voltage switch to match the cart "
                       "BEFORE connecting. Restore overwrites the cart's save "
                       "(and verifies by reading back). The patcher works offline.")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
-        grid.addWidget(hint, 5, 0, 1, 2)
+        grid.addWidget(hint, 6, 0, 1, 2)
         return box
 
     def _build_progress_box(self) -> QGroupBox:
@@ -1313,6 +1318,58 @@ class DeviceWindow(QMainWindow):
             "4AAA/AA": (0x4AAA, 0x4555), "7AAA/AA": (0x7AAA, 0x7555),
         }
         return table.get(v, (0xAAA, 0x555))
+
+    def on_test_block_write(self) -> None:
+        """Experimental: test whether the fast firmware block-write command works
+        on this cart. Erases sector 0 and writes one 256-byte test block, so it is
+        mildly destructive (sector 0 only) and needs a typed confirmation."""
+        if not self._is_gba():
+            QMessageBox.information(
+                self, __app_name__,
+                "This test is for GBA flash carts. Set the switch to GBA with "
+                "the flash cart inserted.")
+            return
+        msg = (
+            "Experimental fast-write test.\n\n"
+            "This checks whether the fast block-write command works on your "
+            "cart. It ERASES sector 0 and writes a small test pattern there, "
+            "then reads it back. It only touches sector 0, and whatever is on "
+            "the cart can be rewritten afterward.\n\n"
+            "Type TEST to run it.")
+        text, ok = QInputDialog.getText(self, __app_name__, msg)
+        if not ok or text.strip().upper() != "TEST":
+            self.log("Block-write test cancelled.")
+            return
+
+        def job(progress, log, cancel):
+            self.dev.select_gba()
+            self.dev.set_mode(gx.VOLTAGE_5V)
+            import time as _t
+            _t.sleep(0.1)
+            try:
+                # Try the plain 'f' command first (non-swapped carts).
+                ok_f, _rb, m = self.dev.gba_flash_block_write_probe(
+                    block_command="f", log=log)
+                if ok_f:
+                    log("RESULT: the fast block-write command 'f' works on this "
+                        "cart. A fast write mode can use it.")
+                    return
+                # If 'f' failed as swapped, try 't'.
+                if "swap" in m.lower():
+                    log("Plain command came back swapped; trying the swapped "
+                        "command 't'\u2026")
+                    ok_t, _rb2, _m2 = self.dev.gba_flash_block_write_probe(
+                        block_command="t", log=log)
+                    if ok_t:
+                        log("RESULT: the swapped block-write command 't' works "
+                            "on this cart.")
+                        return
+                log("RESULT: the fast block-write command did not verify on this "
+                    "cart. The reliable word-at-a-time write is unaffected.")
+            finally:
+                self.dev.set_mode(gx.VOLTAGE_3_3V)
+
+        self._start(job, "Block-write test complete.")
 
     def on_patch(self) -> None:
         from .patch_window import PatchDialog
