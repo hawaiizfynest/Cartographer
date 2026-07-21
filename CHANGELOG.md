@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.11
+
+- Groundwork for ROM writing: the app can now erase a single flash sector and
+  verify it. This is the core building block a full ROM write is made of, added
+  on its own so it can be tested in isolation before any write loop is built on
+  top of it. Erasing a sector sends the standard unlock-and-erase sequence, polls
+  the chip's status register until the erase finishes (with a timeout so it can
+  never hang), then reads the sector back and confirms every byte is 0xFF. It
+  targets one sector at a time against the sector map read from CFI, and reports
+  exactly what the chip returned, so a failure is informative rather than silent.
+  Erasing flash is destructive by nature; this step is deliberately small and
+  self-checking so the write path can be built on a foundation that is known to
+  work.
+
 ## v1.0.10
 
 - Identify flash chip now reads the chip's true size and capabilities from its

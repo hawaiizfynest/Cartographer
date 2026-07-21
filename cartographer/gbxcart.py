@@ -446,6 +446,94 @@ class GBxCart:
         """Return the flash chip to normal read mode."""
         self.gba_flash_write_address_byte(0x000, 0xF0)
 
+    def _gba_read_bytes_at(self, address: int, count: int) -> bytes:
+        """Read `count` bytes from a given GBA ROM byte address. The address is
+        halved for the 16-bit bus, matching how reads are addressed elsewhere."""
+        import io
+        self.ser.reset_input_buffer()  # type: ignore[union-attr]
+        self.set_number(address // 2, SET_START_ADDRESS)
+        self.set_mode(GBA_READ_ROM)
+        buf = io.BytesIO()
+        self._read_stream(buf, count, _noop, _never)
+        return buf.getvalue()[:count]
+
+    def gba_flash_erase_sector(self, sector_addr: int, unlock_a1: int = 0xAAA,
+                               unlock_a2: int = 0x555,
+                               verify_len: int = 0x80,
+                               timeout_s: float = 12.0,
+                               log=None) -> tuple[bool, bytes]:
+        """Erase ONE flash sector at `sector_addr` and verify it reads back 0xFF.
+
+        DESTRUCTIVE: this erases the flash contents of one sector. It is the
+        atomic building block of a ROM write, kept separate so it can be tested
+        on its own. It never touches more than the one sector it is told to.
+
+        Sequence (standard AMD-style sector erase, matching the reference
+        flasher): unlock (a1=0xAA, a2=0x55), erase setup (a1=0x80), unlock again
+        (a1=0xAA, a2=0x55), then the sector-address command (SA=0x30). The chip
+        then erases the sector, which takes up to a second or so. We poll the
+        sector address until it reads 0xFFFF (DQ7/data all ones = erase done),
+        with a timeout so this can never hang. Finally we read the first
+        verify_len bytes back and confirm they are all 0xFF.
+
+        Returns (ok, sample_bytes). ok is True only if the status poll succeeded
+        AND the read-back is all 0xFF. sample_bytes is what the sector actually
+        contained after the attempt, for diagnosis on failure.
+
+        Assumes the caller has already selected GBA mode and set 5V. Leaves the
+        chip in normal read mode.
+        """
+        def _log(msg: str) -> None:
+            if log:
+                log(msg)
+
+        # Make sure we start in a clean read state.
+        self.gba_flash_reset()
+
+        # AMD-style six-write sector erase command.
+        _log(f"Erasing sector at 0x{sector_addr:X} (unlock {unlock_a1:X}/"
+             f"{unlock_a2:X})\u2026")
+        self.gba_flash_write_address_byte(unlock_a1, 0xAA)
+        self.gba_flash_write_address_byte(unlock_a2, 0x55)
+        self.gba_flash_write_address_byte(unlock_a1, 0x80)   # erase setup
+        self.gba_flash_write_address_byte(unlock_a1, 0xAA)
+        self.gba_flash_write_address_byte(unlock_a2, 0x55)
+        self.gba_flash_write_address_byte(sector_addr, 0x30)  # sector erase
+
+        # Poll the sector until it reads 0xFFFF (erase complete). The chip
+        # returns not-0xFF while busy; once erased every bit is 1.
+        import time as _time
+        deadline = _time.time() + timeout_s
+        done = False
+        last = b""
+        while _time.time() < deadline:
+            _time.sleep(0.1)
+            last = self._gba_read_bytes_at(sector_addr, 2)
+            if len(last) >= 2 and last[0] == 0xFF and last[1] == 0xFF:
+                done = True
+                break
+
+        # Always return to read mode before reading back.
+        self.gba_flash_reset()
+
+        if not done:
+            _log(f"  Sector erase timed out after {timeout_s:.0f}s "
+                 f"(last status: {last.hex() if last else 'none'}).")
+            sample = self._gba_read_bytes_at(sector_addr, verify_len)
+            return False, sample
+
+        # Verify the sector reads back all 0xFF.
+        sample = self._gba_read_bytes_at(sector_addr, verify_len)
+        all_ff = len(sample) == verify_len and all(b == 0xFF for b in sample)
+        if all_ff:
+            _log(f"  Sector erased and verified (read back {verify_len} bytes, "
+                 f"all 0xFF).")
+        else:
+            nonff = next((i for i, b in enumerate(sample) if b != 0xFF), -1)
+            _log(f"  Sector erase verify FAILED: byte {nonff} is "
+                 f"0x{sample[nonff]:02X}, expected 0xFF.")
+        return all_ff, sample
+
     # Flash-ID unlock sequences. Each is (name, (a1,d1), (a2,d2), (a3,d3), reset)
     # where the three writes enter read-ID mode and reset returns to read mode.
     # These are the exact address bases FlashGBX tries, in the same order. The

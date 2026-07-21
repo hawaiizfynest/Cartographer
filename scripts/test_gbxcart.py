@@ -150,6 +150,28 @@ class FakeSerial:
     _wbuf_eeprom = b""
     _wbuf_flash = b""
     _erased_flash = False
+    _rom_sector_size = 0x20000    # 128 KB sectors, matching the CFI sim
+    _erased_rom_sectors = None    # set of erased sector base addresses
+
+    def _erase_rom_sector(self, sector_byte_addr):
+        # Mark the 128 KB sector containing this address as erased. A real chip
+        # erases the aligned sector, so snap down to the sector boundary.
+        if self._erased_rom_sectors is None:
+            self._erased_rom_sectors = set()
+        base = (sector_byte_addr // self._rom_sector_size) * self._rom_sector_size
+        self._erased_rom_sectors.add(base)
+
+    def _effective_rom(self):
+        # The ROM as the host would read it: erased sectors read back as 0xFF.
+        if not self._erased_rom_sectors:
+            return self.rom
+        buf = bytearray(self.rom)
+        for base in self._erased_rom_sectors:
+            end = min(base + self._rom_sector_size, len(buf))
+            if base < len(buf):
+                for i in range(base, end):
+                    buf[i] = 0xFF
+        return bytes(buf)
 
     def _handle_flash_byte(self, hexstr):
         # 'n' commands arrive in pairs: address then value.
@@ -197,6 +219,22 @@ class FakeSerial:
             self._flash_cmd = []
             return
         self._flash_cmd.append((addr, val))
+        # Recognise the AMD sector-erase sequence ending in 0x30:
+        # a1=0xAA, a2=0x55, a1=0x80, a1=0xAA, a2=0x55, SA=0x30 (halved addrs).
+        # The chip requires 5V like everything else on these repro carts.
+        if val == 0x30 and self.cfi_variant is not None:
+            if self.requires_5v and self._voltage != 5:
+                return
+            seq = self._flash_cmd[-6:]
+            if len(seq) == 6:
+                vals = tuple(v for _a, v in seq)
+                if vals == (0xAA, 0x55, 0x80, 0xAA, 0x55, 0x30):
+                    # The 6th write's address (halved) is the sector to erase.
+                    sector_halved = seq[5][0]
+                    sector_byte_addr = sector_halved * 2
+                    self._erase_rom_sector(sector_byte_addr)
+                    self._flash_cmd = []
+                    return
         # Recognise the 3-write unlock ending in 0x90 -> enter ID mode, but only
         # for the command set this chip actually speaks (addr + unlock byte), and
         # only at the right voltage if the chip requires 5V.
@@ -317,7 +355,7 @@ class FakeSerial:
         elif cmd == "R":          # GB read ROM/RAM at current address/bank
             self._start_gb_stream()
         elif cmd == "r":          # GBA read ROM (addr is addr/2)
-            self._begin_stream(self.rom, self._addr * 2)
+            self._begin_stream(self._effective_rom(), self._addr * 2)
         elif cmd == "m":          # GBA read SRAM (respect selected save bank)
             if self._erased_flash and self._wbuf_flash:
                 base = self._save_bank * 0x10000 + self._addr
@@ -680,6 +718,42 @@ def test_cfi_parse_rejects_non_cfi():
     # A buffer without the QRY magic must not parse as CFI.
     assert flash_db.parse_cfi(bytes(0x400)) is None
     assert flash_db.parse_cfi(b"\x00" * 4) is None
+
+
+def test_sector_erase_and_verify_succeeds():
+    # v1.0.11: erasing one sector must set that sector to 0xFF and verify it.
+    # ROM is non-0xFF everywhere; after erasing the sector at 0x0 it must read
+    # back all 0xFF, and only that sector.
+    rom = bytes((i * 7 + 1) & 0xFF for i in range(0x40000))  # 256 KB, 2 sectors
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=rom, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    dev = _connect(fake)
+    dev.select_gba()
+    dev.set_mode(gx.VOLTAGE_5V)   # erase only works at 5V on these carts
+    ok, sample = dev.gba_flash_erase_sector(0x0, unlock_a1=0xAAA, unlock_a2=0x555,
+                                            verify_len=0x80, timeout_s=5.0)
+    assert ok is True, f"erase should succeed, got sample {sample[:8].hex()}"
+    assert all(b == 0xFF for b in sample)
+    # The second sector (at 0x20000) must be untouched.
+    dev.set_mode(gx.VOLTAGE_5V)
+    second = dev._gba_read_bytes_at(0x20000, 16)
+    assert not all(b == 0xFF for b in second), "only the target sector should erase"
+
+
+def test_sector_erase_requires_5v():
+    # At 3.3V the chip ignores the erase (these repro carts are 5V-only), so the
+    # verify must fail rather than falsely report success.
+    rom = bytes((i * 7 + 1) & 0xFF for i in range(0x40000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=rom, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    dev = _connect(fake)
+    dev.select_gba()             # leaves 3.3V
+    ok, _sample = dev.gba_flash_erase_sector(0x0, unlock_a1=0xAAA,
+                                             unlock_a2=0x555, verify_len=0x80,
+                                             timeout_s=2.0)
+    assert ok is False, "erase at 3.3V must not verify as succeeded"
 
 
 def test_flash_id_probe_5v_repro_cart():
