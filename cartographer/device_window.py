@@ -610,7 +610,7 @@ class DeviceWindow(QMainWindow):
         grid.addWidget(self.btn_verify, 2, 1)
         grid.addWidget(self.btn_cartadvice, 3, 0)
         grid.addWidget(self.btn_patch, 3, 1)
-        grid.addWidget(self.btn_write_rom, 4, 0)
+        grid.addWidget(self.btn_write_rom, 4, 0, 1, 2)
 
         self.action_buttons = [
             self.btn_readinfo, self.btn_backup_rom, self.btn_backup_save,
@@ -621,7 +621,7 @@ class DeviceWindow(QMainWindow):
                       "(and verifies by reading back). The patcher works offline.")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
-        grid.addWidget(hint, 4, 0, 1, 2)
+        grid.addWidget(hint, 5, 0, 1, 2)
         return box
 
     def _build_progress_box(self) -> QGroupBox:

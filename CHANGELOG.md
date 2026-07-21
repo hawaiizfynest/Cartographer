@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.13
+
+- Fixed the Write ROM button overlapping the voltage-switch note at the bottom
+  of the window. The button now sits on its own row across the full width, with
+  the note below it.
+
 ## v1.0.12
 
 - ROM writing has arrived for GBA flash carts. The app can now write a .gba ROM
