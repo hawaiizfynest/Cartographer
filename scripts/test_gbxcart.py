@@ -168,6 +168,9 @@ class FakeSerial:
         for a in [k for k in self._programmed_words if base <= k < end]:
             del self._programmed_words[a]
 
+    _program_commit_reads = 0    # reads-before-commit; 0 = instant (test knob)
+    _pending_commit = None       # (byte_addr, word, reads_remaining)
+
     def _program_rom_word(self, byte_addr, word):
         # Program a 16-bit word. Real NOR flash can only clear bits (AND), and
         # only within an erased sector. Model that: the word ANDs with whatever
@@ -185,11 +188,30 @@ class FakeSerial:
             cur = lo | (hi << 8)
         if byte_addr in self._programmed_words:
             cur = self._programmed_words[byte_addr]
-        self._programmed_words[byte_addr] = cur & word   # AND: can only clear
+        newval = cur & word          # AND: can only clear
+        if self._program_commit_reads > 0:
+            # Model a chip that needs a moment: the new value is not visible until
+            # after _program_commit_reads readbacks. Until then the address reads
+            # its previous value (0xFFFF when erased), so a writer that does not
+            # poll would move on too early and miss it.
+            self._pending_commit = [byte_addr, newval,
+                                    self._program_commit_reads]
+        else:
+            self._programmed_words[byte_addr] = newval
 
     def _effective_rom(self):
         # The ROM as the host would read it: erased sectors read back as 0xFF,
         # then any programmed words overlaid on top.
+        # First, advance any pending (slow-commit) program: each read brings it
+        # one step closer to visible, modelling a chip that needs time to store.
+        if self._pending_commit is not None:
+            self._pending_commit[2] -= 1
+            if self._pending_commit[2] <= 0:
+                a, val, _ = self._pending_commit
+                if self._programmed_words is None:
+                    self._programmed_words = {}
+                self._programmed_words[a] = val
+                self._pending_commit = None
         if not self._erased_rom_sectors and not self._programmed_words:
             return self.rom
         buf = bytearray(self.rom)
@@ -802,22 +824,50 @@ def test_sector_erase_requires_5v():
     assert ok is False, "erase at 3.3V must not verify as succeeded"
 
 
-def test_write_rom_end_to_end_verifies():
-    # v1.0.12: writing a ROM must erase, program, and read back matching. Use a
-    # small ROM the sim can hold: two 128 KB sectors, a distinctive pattern that
-    # differs from the original ROM so the write is actually doing something.
-    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x40000))    # 256 KB start
-    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x30000))  # 192 KB new ROM
+def test_write_rom_waits_for_slow_committing_words():
+    # v1.0.14: the real hardware bug was a word not finishing before the next
+    # command arrived, so it was silently dropped. Model that: each programmed
+    # word needs 2 readbacks before it becomes visible. With the program-poll
+    # fix, the write must WAIT for each word and still verify. (Without polling,
+    # this would fail exactly like the real cart did.)
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x4000))
+    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x1000))    # 4 KB
     fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
     fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
                       flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000
+    fake._program_commit_reads = 2     # each word takes 2 readbacks to commit
+    dev = _connect(fake)
+    dev.flash_settle_s = 0
+    dev.flash_poll_s = 0
+    dev.flash_poll_word_s = 0
+    dev.select_gba()
+    dev.set_mode(gx.VOLTAGE_5V)
+    ok, msg = dev.gba_flash_write_rom(new_rom, ((0x1000, 4),))
+    assert ok is True, f"write must wait for slow words and succeed: {msg}"
+    dev.set_mode(gx.VOLTAGE_5V)
+    readback = dev._gba_read_bytes_at(0x0, len(new_rom))
+    assert readback == new_rom
+
+
+def test_write_rom_end_to_end_verifies():
+    # v1.0.12: writing a ROM must erase, program, and read back matching. Use a
+    # small sector size and ROM so the per-word program-and-poll path runs
+    # quickly in the sim; the erase/program/verify/advance logic is identical to
+    # the real 128 KB sectors.
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x4000))     # 16 KB start
+    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x1800))   # 6 KB new ROM
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000     # 4 KB sectors for a fast test
     dev = _connect(fake)
     dev.flash_settle_s = 0        # no real-hardware delays in the simulator
     dev.flash_poll_s = 0
     dev.select_gba()
     dev.set_mode(gx.VOLTAGE_5V)
-    # CFI map: 128 KB sectors. 256 KB chip = 2 sectors.
-    regions = ((0x20000, 2),)
+    # CFI map: 4 KB sectors, 4 of them = 16 KB.
+    regions = ((0x1000, 4),)
     ok, msg = dev.gba_flash_write_rom(new_rom, regions, unlock_a1=0xAAA,
                                       unlock_a2=0x555)
     assert ok is True, f"write should succeed: {msg}"
@@ -829,17 +879,18 @@ def test_write_rom_end_to_end_verifies():
 
 def test_write_rom_refuses_oversize():
     # A ROM larger than the chip must be refused, not written past the end.
-    orig = bytes(0x40000)
-    big = bytes(0x50000)   # bigger than the 2x128KB = 256 KB map below
+    orig = bytes(0x4000)
+    big = bytes(0x5000)    # bigger than the 4x4KB = 16 KB map below
     fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
     fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
                       flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000
     dev = _connect(fake)
     dev.flash_settle_s = 0
     dev.flash_poll_s = 0
     dev.select_gba()
     dev.set_mode(gx.VOLTAGE_5V)
-    ok, msg = dev.gba_flash_write_rom(big, ((0x20000, 2),))
+    ok, msg = dev.gba_flash_write_rom(big, ((0x1000, 4),))
     assert ok is False
     assert "past the end" in msg or "holds" in msg
 
@@ -847,16 +898,17 @@ def test_write_rom_refuses_oversize():
 def test_write_rom_stops_on_bad_verify():
     # If a sector won't erase (sim at 3.3V), the write must stop and report it,
     # never claiming success.
-    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x40000))
-    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x20000))
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x4000))
+    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x1000))
     fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
     fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
                       flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000
     dev = _connect(fake)
     dev.flash_settle_s = 0
     dev.flash_poll_s = 0
     dev.select_gba()             # 3.3V - erase will be ignored by the chip
-    ok, msg = dev.gba_flash_write_rom(new_rom, ((0x20000, 2),))
+    ok, msg = dev.gba_flash_write_rom(new_rom, ((0x1000, 4),))
     assert ok is False
     assert "erase" in msg.lower()
 

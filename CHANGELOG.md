@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.14
+
+- Fixed ROM writes failing partway with a verify error. The program step sent
+  each word and moved straight to the next without waiting for the chip to finish
+  committing it. Most words kept up, but every so often one had not finished
+  before the next command arrived and was silently dropped, so the write stopped
+  at a verify mismatch. Programming now waits for each word to actually take
+  (reading the address back until it matches, with a short timeout) before moving
+  on, matching how the chip expects to be driven. This makes writes reliable at
+  the cost of being a little slower, which on this word-at-a-time path is not
+  noticeable.
+
 ## v1.0.13
 
 - Fixed the Write ROM button overlapping the voltage-switch note at the bottom

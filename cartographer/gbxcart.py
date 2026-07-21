@@ -421,6 +421,8 @@ class GBxCart:
     flash_settle_s = 0.001
     # Poll interval while waiting for a sector erase to finish, in seconds.
     flash_poll_s = 0.1
+    # Poll interval while waiting for a single word to finish programming.
+    flash_poll_word_s = 0.0
 
     def gba_flash_write_address_byte(self, address: int, byte: int) -> None:
         """Write a command byte to the GBA flash cart bus. The address is halved
@@ -546,19 +548,40 @@ class GBxCart:
 
     def gba_flash_program_word(self, byte_addr: int, word: int,
                                unlock_a1: int = 0xAAA,
-                               unlock_a2: int = 0x555) -> None:
-        """Program one 16-bit word at `byte_addr` using the AMD program command.
+                               unlock_a2: int = 0x555,
+                               poll_timeout_s: float = 0.5) -> bool:
+        """Program one 16-bit word at `byte_addr`, then wait for it to commit.
 
         Sequence: unlock (a1=0xAA, a2=0x55), program setup (a1=0xA0), then write
-        the data word at its address. One word per call. This is the standard
-        S29GL/AMD single-word program the reference flasher uses for host-driven
-        writes. The chip must already be erased at this address (program can only
-        clear bits, not set them). Caller handles verification.
+        the data word at its address. This is the standard S29GL/AMD single-word
+        program the reference flasher uses for host-driven writes. The chip must
+        already be erased at this address (program can only clear bits).
+
+        After issuing the program, the chip needs a moment to actually store the
+        word. We must wait for that before the next command, or the chip - still
+        busy programming - drops the next unlock and the word is silently lost.
+        We wait by data-polling: read the address back until it reads the value we
+        wrote (AMD DQ7/data polling), with a short timeout. Returns True if the
+        word read back correct within the timeout, False otherwise.
         """
         self.gba_flash_write_address_byte(unlock_a1, 0xAA)
         self.gba_flash_write_address_byte(unlock_a2, 0x55)
         self.gba_flash_write_address_byte(unlock_a1, 0xA0)   # program setup
         self.gba_flash_write_address_byte(byte_addr, word)   # data word
+
+        # Data-poll: wait until the address reads back the value we wrote. While
+        # the chip is still programming, the read differs; once done, it matches.
+        import time as _time
+        want = bytes([word & 0xFF, (word >> 8) & 0xFF])
+        deadline = _time.time() + poll_timeout_s
+        while _time.time() < deadline:
+            got = self._gba_read_bytes_at(byte_addr, 2)
+            if got == want:
+                return True
+            if self.flash_poll_word_s:
+                _time.sleep(self.flash_poll_word_s)
+        # One last check before giving up.
+        return self._gba_read_bytes_at(byte_addr, 2) == want
 
     def gba_flash_write_rom(self, data: bytes, erase_regions,
                             unlock_a1: int = 0xAAA, unlock_a2: int = 0x555,
@@ -651,9 +674,23 @@ class GBxCart:
                     word = lo | (hi << 8)
                     if word == 0xFFFF:
                         continue      # already erased to 0xFF
-                    self.gba_flash_program_word(
-                        sec_addr + off, word,
-                        unlock_a1=unlock_a1, unlock_a2=unlock_a2)
+                    # Program the word, waiting for it to commit. Retry a couple
+                    # of times if it doesn't take, since an occasional word needs
+                    # a second attempt; fail cleanly if it truly won't program.
+                    committed = False
+                    for _try in range(3):
+                        if self.gba_flash_program_word(
+                                sec_addr + off, word,
+                                unlock_a1=unlock_a1, unlock_a2=unlock_a2):
+                            committed = True
+                            break
+                        self.gba_flash_reset()
+                    if not committed:
+                        self.gba_flash_reset()
+                        return False, (f"Word at 0x{sec_addr + off:X} would not "
+                                       f"program (wrote 0x{word:04X}, did not "
+                                       f"read back) after retries. Write "
+                                       f"stopped.")
                 self.gba_flash_reset()
 
                 # Verify the whole sector reads back matching the file.
