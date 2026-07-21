@@ -454,6 +454,74 @@ class GBxCart:
         ("7AAA/AA",  (0x7AAA, 0xAA), (0x7555, 0x55), (0x7AAA, 0x90), (0x7000, 0xF0)),
     )
 
+    def _gba_read_bytes(self, count: int) -> bytes:
+        """Read `count` bytes from GBA ROM address 0 (for CFI/ID buffers)."""
+        import io
+        self.ser.reset_input_buffer()  # type: ignore[union-attr]
+        self.set_number(0, SET_START_ADDRESS)
+        self.set_mode(GBA_READ_ROM)
+        buf = io.BytesIO()
+        self._read_stream(buf, count, _noop, _never)
+        return buf.getvalue()[:count]
+
+    # Address bases to try for the CFI query (0x98) and identifier (0x90). These
+    # match the reference flasher's table: the base that answers tells us where
+    # the chip is mapped. 0x555/0x5555/0xAAA/0xAAAA plus the 0x4xxx/0x7xxx bank
+    # offsets, then a bare address-0 Intel-style query last.
+    # Address bases to try for the CFI query (0x98) and identifier (0x90). Each
+    # row is (name, cfi_addr, unlock_a1, unlock_a2, reset_addr). The unlock is
+    # a1/a2/a1; a1 == 0 means the Intel-style single-0x90 read at address 0.
+    # These match the reference flasher's table.
+    _CFI_METHODS = (
+        ("555",   0x555,  0x555,  0x2AA,  0x0),
+        ("5555",  0x5555, 0x5555, 0x2AAA, 0x0),
+        ("AAA",   0xAA,   0xAAA,  0x555,  0x0),
+        ("AAAA",  0xAAAA, 0xAAAA, 0x5555, 0x0),
+        ("4AAA",  0x4555, 0x4AAA, 0x4555, 0x4000),
+        ("7AAA",  0x7555, 0x7AAA, 0x7555, 0x7000),
+        ("bare",  0x0,    0x0,    0x0,    0x0),
+    )
+
+    def _gba_cfi_query(self) -> tuple[str, bytes]:
+        """Find the chip's CFI table and read its ID from the matching base.
+
+        Mirrors the reference flasher: for each address base, reset the chip,
+        send the CFI query command (0x98), read a 0x400 buffer, and look for the
+        "QRY" signature at byte offsets 0x20/0x22/0x24. When found, that base is
+        the right one; issue its read-identifier command (0x90) and read the
+        manufacturer/device ID. Returns (method_name, id_bytes) or ("", b"").
+
+        Read-only: only enters and exits CFI/ID mode, never erases or programs.
+        """
+        for name, cfi_addr, a1, a2, reset_addr in self._CFI_METHODS:
+            # Reset first so we start from a known state.
+            self.gba_flash_write_address_byte(reset_addr, 0xF0)
+            # CFI query.
+            self.gba_flash_write_address_byte(cfi_addr, 0x98)
+            buf = self._gba_read_bytes(0x400)
+            if len(buf) < 0x28:
+                self.gba_flash_write_address_byte(reset_addr, 0xF0)
+                continue
+            # CFI "QRY" magic lives at byte offsets 0x20, 0x22, 0x24 on the
+            # 16-bit bus (every other byte).
+            magic = bytes([buf[0x20], buf[0x22], buf[0x24]])
+            if magic != b"QRY":
+                self.gba_flash_write_address_byte(reset_addr, 0xF0)
+                continue
+            # Found the chip. Read its ID at this base - go straight from CFI to
+            # the identifier read (no reset in between) so the chip stays awake,
+            # the way the reference flasher does.
+            if a1 == 0x0:
+                self.gba_flash_write_address_byte(0x0, 0x90)      # Intel-style
+            else:
+                self.gba_flash_write_address_byte(a1, 0xAA)       # AMD unlock
+                self.gba_flash_write_address_byte(a2, 0x55)
+                self.gba_flash_write_address_byte(a1, 0x90)
+            ident = self._gba_read_bytes(8)
+            self.gba_flash_write_address_byte(reset_addr, 0xF0)
+            return name, ident
+        return "", b""
+
     def gba_flash_intel_reset(self) -> None:
         """Intel chips leave read-ID mode with 0xFF, not 0xF0."""
         self.gba_flash_write_address_byte(0x000, 0xFF)
@@ -473,8 +541,9 @@ class GBxCart:
 
         Methods tried, in order (all read-only):
           * baseline    - a plain ROM read at 5V, for comparison
-          * 555/AA .. 7AAA/AA - the AMD-style unlock sequences across the address
-                          bases FlashGBX uses (the wider set repro carts need)
+          * cfi-<base>  - a Common Flash Interface query (the reliable method);
+                          finds the chip's "QRY" table and reads a clean ID
+          * 555/AA .. 7AAA/AA - AMD-style unlock sequences (fallback)
           * bare-90     - a single 0x90 write to address 0 (Intel-type detect)
 
         Returns {'baseline': bytes, '<method>': bytes, ...}. Any method whose
@@ -491,7 +560,17 @@ class GBxCart:
             results: dict[str, bytes] = {"baseline": self._gba_read8()}
             self.gba_flash_reset()
 
-            # AMD-style unlock sequences across all the address bases.
+            # Preferred method: CFI query. This finds the chip's CFI table and
+            # reads a clean manufacturer/device ID from the right base, the way
+            # the reference flasher does. When it works it is far more reliable
+            # than the bare unlock-and-read below, which can read a partial ID.
+            cfi_name, cfi_id = self._gba_cfi_query()
+            if cfi_id and cfi_id[:4] != results["baseline"][:4]:
+                results["cfi-" + cfi_name] = cfi_id
+            self.gba_flash_reset()
+
+            # AMD-style unlock sequences across all the address bases (fallback
+            # for chips that answer the unlock-and-read but not the CFI query).
             for name, c1, c2, c3, rst in self.FLASH_ID_VARIANTS:
                 for addr, val in (c1, c2, c3):
                     self.gba_flash_write_address_byte(addr, val)

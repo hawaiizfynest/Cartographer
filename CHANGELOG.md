@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.8
+
+- Identify flash chip now reads a clean, complete chip ID on the repro carts it
+  used to only half-read. The previous probe woke the chip but read the ID from
+  slightly the wrong place, so a real S29GL-class cart came back with a partial
+  ID and landed as "not in the database." The probe now runs a proper Common
+  Flash Interface query the way the reference flasher does: it looks for the
+  chip's "QRY" signature, and when it finds it, reads the manufacturer and device
+  ID from the right offsets. Carts that reported a garbled ID now identify
+  correctly.
+- The probe reports whether it confirmed the chip through CFI, so a solid
+  identification and a guess are easy to tell apart.
+
 ## v1.0.7
 
 - The flash chip identifier now works on the repro carts that need 5V. Some

@@ -83,7 +83,7 @@ CHIP_IDS = {
     (0x01, 0x227E): ChipInfo("Spansion S29GL128/256/512 family", 16,
                              "device id 0x227E is shared across this family; "
                              "true size (16-64 MB) comes from CFI. Common on "
-                             "EpicJoy/Gugxiom-style 5V repro carts."),
+                             "EpicJoy/Gugxiom-style 5V repro carts"),
     (0x20, 0x227E): ChipInfo("ST/Numonyx M29W128 (e.g. M29W128GH)", 16,
                              "common on EpicJoy-style RTC/solar repro carts"),
     (0xC2, 0x227E): ChipInfo("Macronix MX29GL128", 16),
@@ -181,7 +181,11 @@ def lookup_chip(mfr: int, dev: int):
 def interpret(probe: dict) -> FlashIdResult:
     """Turn a gba_flash_id_probe() dict into a FlashIdResult."""
     baseline = probe.get("baseline", b"")
-    for variant in _PROBE_ORDER:
+    # CFI-confirmed results come first: a chip that answered a CFI query is
+    # identified far more reliably than one read by a bare unlock sequence. CFI
+    # keys look like "cfi-555", "cfi-AAAA", etc.
+    cfi_keys = sorted(k for k in probe if k.startswith("cfi-"))
+    for variant in (*cfi_keys, *_PROBE_ORDER):
         data = probe.get(variant, b"")
         if data and data[:4] != baseline[:4]:
             mfr_b, dev_b, mfr_w, dev_w = _decode_ids(data)
@@ -193,9 +197,11 @@ def interpret(probe: dict) -> FlashIdResult:
                 chip, mfr_id, dev_id = chip_b, mfr_b, dev_b
             else:
                 chip, mfr_id, dev_id = None, mfr_b, (dev_w or dev_b)
+            method = (WRITE_AAA if variant.startswith("cfi-")
+                      else _VARIANT_TO_METHOD.get(variant, WRITE_UNKNOWN))
             return FlashIdResult(
                 is_flashable=True, variant=variant,
-                write_method=_VARIANT_TO_METHOD.get(variant, WRITE_UNKNOWN),
+                write_method=method,
                 manufacturer_id=mfr_id, device_id=dev_id,
                 manufacturer=MANUFACTURERS.get(mfr_id & 0xFF, "Unknown"),
                 chip=chip, raw=probe)

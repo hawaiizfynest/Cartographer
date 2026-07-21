@@ -26,7 +26,8 @@ class FakeSerial:
     """Minimal stand-in for serial.Serial that emulates a GBxCart device."""
 
     def __init__(self, rom=b"", sram=b"", mode=gx.GBA_MODE, fw=20, pcb=3,
-                 flash_id=None, flash_variant="AAA/AA", requires_5v=False):
+                 flash_id=None, flash_variant="AAA/AA", requires_5v=False,
+                 cfi_variant=None):
         self.rom = rom
         self.sram = sram
         self.mode = mode
@@ -39,6 +40,10 @@ class FakeSerial:
         # the real Gugxiom/EpicJoy S29GL repro carts. The probe must have sent the
         # '5' voltage command for read-ID mode to engage.
         self.requires_5v = requires_5v
+        # cfi_variant: if set (e.g. "AAAA"), the chip answers a CFI query (0x98)
+        # at that address base and then reads its ID after a 0x90. None = no CFI.
+        self.cfi_variant = cfi_variant
+        self._cfi_mode = False
         self._voltage = 3            # tracks last '5'/'3' voltage command
         self.eeprom = b""          # EEPROM contents (8-byte addressed)
         self.flash_bank1 = b""     # second flash/SRAM bank contents
@@ -167,11 +172,27 @@ class FakeSerial:
             return
         if val in (0xF0, 0xFF):
             self._id_mode = False
+            self._cfi_mode = False
             self._flash_cmd = []
+            return
+        # CFI query: 0x98 at the chip's CFI base enters CFI mode (returns the QRY
+        # table). Honour the 5V requirement like the ID commands.
+        if val == 0x98 and self.cfi_variant is not None:
+            if self.requires_5v and self._voltage != 5:
+                return
+            # The halved base the host sends for this chip's CFI query.
+            if addr == self._cfi_halved_addr():
+                self._cfi_mode = True
+                self._flash_cmd = []
             return
         # Intel: a lone 0x90 written to address 0 enters read-ID mode.
         if (val == 0x90 and addr == 0x00 and self.flash_id is not None
                 and self.flash_variant == "Intel/90"):
+            self._id_mode = True
+            self._flash_cmd = []
+            return
+        # After a CFI match, a 0x90 (any recognised base) reads the ID.
+        if val == 0x90 and self._cfi_mode and self.flash_id is not None:
             self._id_mode = True
             self._flash_cmd = []
             return
@@ -355,7 +376,31 @@ class FakeSerial:
         self._out += self.eeprom[0:8].ljust(8, b"\x00")
         self._stream[1] = 8
 
+    def _cfi_halved_addr(self):
+        # The CFI query address for each variant, halved (host divides by 2).
+        bases = {"555": 0x555, "5555": 0x5555, "AAA": 0xAA, "AAAA": 0xAAAA,
+                 "4AAA": 0x4555, "7AAA": 0x7555, "bare": 0x0}
+        return bases.get(self.cfi_variant, 0x555) // 2
+
+    def _cfi_buffer(self):
+        # Build a 0x400 CFI response: "QRY" at byte offsets 0x20/0x22/0x24, with
+        # the flash_id bytes at the front so an ID read still works. The rest is
+        # zero-filled, which is enough for the probe's QRY check.
+        buf = bytearray(0x400)
+        buf[0x00:len(self.flash_id)] = self.flash_id
+        buf[0x20] = ord("Q")
+        buf[0x22] = ord("R")
+        buf[0x24] = ord("Y")
+        return bytes(buf)
+
     def _begin_stream(self, data, cursor):
+        # In CFI mode, a GBA read returns the CFI table (with the QRY magic).
+        if self._cfi_mode and self.flash_id is not None:
+            resp = self._cfi_buffer()
+            self._stream = [resp, 0]
+            self._out += resp[:gx.BLOCK]
+            self._stream[1] = gx.BLOCK
+            return
         # In flash ID mode, a GBA read returns the chip's ID response.
         if self._id_mode and self.flash_id is not None:
             resp = (self.flash_id * 8)[:64]
@@ -555,6 +600,29 @@ def test_flash_id_probe_retail():
     result = flash_db.interpret(probe)
     assert not result.is_flashable
     assert "mask-ROM" in result.summary()
+
+
+def test_flash_id_probe_cfi_clean_read():
+    from cartographer import flash_db
+    # v1.0.8: the real Gugxiom case done right. The chip answers a CFI query at
+    # 5V and returns a clean 01/227E ID. This must be preferred over any partial
+    # unlock-and-read result, and must identify the chip from the CFI path.
+    rom = bytes((i * 5 + 3) & 0xFF for i in range(0x1000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    dev = _connect(FakeSerial(rom=rom, mode=gx.GBA_MODE, flash_id=fid,
+                              flash_variant="none", requires_5v=True,
+                              cfi_variant="AAAA"))
+    probe = dev.gba_flash_id_probe()
+    # A cfi-* method must be present and carry the clean ID.
+    cfi_keys = [k for k in probe if k.startswith("cfi-")]
+    assert cfi_keys, "CFI query should have produced a result"
+    result = flash_db.interpret(probe)
+    assert result.is_flashable
+    assert result.manufacturer_id == 0x01
+    assert result.device_id == 0x227E
+    assert result.variant.startswith("cfi-")
+    assert result.is_known_chip
+    assert "S29GL" in result.chip_label
 
 
 def test_flash_id_probe_5v_repro_cart():
