@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.0.12
+
+- ROM writing has arrived for GBA flash carts. The app can now write a .gba ROM
+  to a supported flash cart, built on the sector erase and verification pieces
+  added in the last few releases. Writing walks the chip's sector map from CFI,
+  erases and verifies each sector, programs it a word at a time using the
+  standard unlock-and-program sequence, then reads the whole sector back and
+  confirms it matches the file before moving on. If any sector fails to erase,
+  program, or verify, the write stops right there and reports exactly where, so a
+  bad write can never masquerade as a good one.
+- Writing is word-at-a-time and therefore slow on this class of cart and older
+  firmware, the same speed the reference flasher reports. That is a limitation of
+  the hardware, not a setting to change. The write is safe to cancel: a cart with
+  a partial ROM is not damaged and can be rewritten.
+- This is exposed as Tools > Write ROM to flash cart, gated behind a clear
+  warning and a typed confirmation, since writing erases whatever is currently on
+  the cart.
+
 ## v1.0.11
 
 - Groundwork for ROM writing: the app can now erase a single flash sector and

@@ -18,8 +18,8 @@ from datetime import datetime
 from typing import Optional
 
 from PyQt6.QtWidgets import (
-    QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog,
+    QLabel, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QVBoxLayout, QWidget,
 )
 
@@ -599,6 +599,8 @@ class DeviceWindow(QMainWindow):
         self.btn_cartadvice.clicked.connect(self.on_cart_advice)
         self.btn_patch = QPushButton("GBA batteryless patch\u2026")
         self.btn_patch.clicked.connect(self.on_patch)
+        self.btn_write_rom = QPushButton("Write ROM to flash cart\u2026")
+        self.btn_write_rom.clicked.connect(self.on_write_rom)
 
         grid.addWidget(self.btn_readinfo, 0, 0)
         grid.addWidget(self.btn_backup_rom, 0, 1)
@@ -608,10 +610,11 @@ class DeviceWindow(QMainWindow):
         grid.addWidget(self.btn_verify, 2, 1)
         grid.addWidget(self.btn_cartadvice, 3, 0)
         grid.addWidget(self.btn_patch, 3, 1)
+        grid.addWidget(self.btn_write_rom, 4, 0)
 
         self.action_buttons = [
             self.btn_readinfo, self.btn_backup_rom, self.btn_backup_save,
-            self.btn_restore_save, self.btn_flashid,
+            self.btn_restore_save, self.btn_flashid, self.btn_write_rom,
         ]
         hint = QLabel("Set the physical GBA/GBC voltage switch to match the cart "
                       "BEFORE connecting. Restore overwrites the cart's save "
@@ -1192,6 +1195,124 @@ class DeviceWindow(QMainWindow):
                         "containing 6600 or 4050M are known not to work.")
 
         self._start(job, "Flash-ID probe complete.")
+
+    def on_write_rom(self) -> None:
+        """Write a ROM file to the flash cart. Gated: identifies the chip first,
+        needs a known CFI sector map, warns clearly, and requires the person to
+        type the word ERASE to confirm, since writing wipes the cart."""
+        if not self._is_gba():
+            QMessageBox.information(
+                self, __app_name__,
+                "Writing here is for GBA flash carts. Set the switch to GBA "
+                "with the flash cart inserted.")
+            return
+
+        # Pick the ROM file.
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a .gba ROM to write", "",
+            "GBA ROMs (*.gba *.bin);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as exc:
+            QMessageBox.critical(self, __app_name__, f"Couldn't read file: {exc}")
+            return
+        if not data:
+            QMessageBox.warning(self, __app_name__, "That file is empty.")
+            return
+
+        # Identify the chip and read its CFI map first. We refuse to write
+        # without a confirmed flashable chip and a real sector map.
+        self.log("Checking the flash cart before writing\u2026")
+
+        def check_job(progress, log, cancel):
+            probe = self.dev.gba_flash_id_probe()
+            # The worker does not pass return values to the after-callback, so
+            # stash the result for after_check to read.
+            self._write_check_result = flash_db.interpret(probe)
+
+        def after_check() -> None:
+            result = getattr(self, "_write_check_result", None)
+            self._write_check_result = None
+            if result is None or not result.is_flashable:
+                QMessageBox.critical(
+                    self, __app_name__,
+                    "No writable flash chip was identified on this cart. Writing "
+                    "is cancelled. Run Identify flash chip to see what the cart "
+                    "reports.")
+                return
+            if result.cfi is None or not result.cfi.erase_regions:
+                QMessageBox.critical(
+                    self, __app_name__,
+                    "The chip was identified, but its sector map could not be "
+                    "read from CFI. Writing needs the sector map to erase "
+                    "safely, so it is cancelled.")
+                return
+
+            regions = result.cfi.erase_regions
+            chip_bytes = sum(sz * n for sz, n in regions)
+            if len(data) > chip_bytes:
+                QMessageBox.critical(
+                    self, __app_name__,
+                    f"This ROM is {len(data) // (1024*1024)} MB but the chip "
+                    f"holds {chip_bytes // (1024*1024)} MB. Writing is "
+                    f"cancelled.")
+                return
+
+            # Clear, honest warning + typed confirmation.
+            warn = (
+                f"About to ERASE the cart and write a new ROM.\n\n"
+                f"Chip: {result.chip_label}\n"
+                f"ROM file: {len(data) // 1024} KB\n\n"
+                f"This permanently erases whatever is currently on the cart "
+                f"(the current game and its save area). Writing is slow on this "
+                f"hardware - it can take a long time - and can be cancelled; a "
+                f"partial write is not damage and can be redone.\n\n"
+                f"Type the word ERASE to confirm.")
+            text, ok = QInputDialog.getText(self, __app_name__, warn)
+            if not ok or text.strip().upper() != "ERASE":
+                self.log("Write cancelled (not confirmed).")
+                return
+
+            a1, a2 = self._unlock_addrs_for(result.variant)
+
+            def write_job(progress, log, cancel):
+                # 5V is required; the probe left the device at 3.3V.
+                self.dev.select_gba()
+                self.dev.set_mode(gx.VOLTAGE_5V)
+                import time as _t
+                _t.sleep(0.1)
+                try:
+                    ok2, msg = self.dev.gba_flash_write_rom(
+                        data, regions, unlock_a1=a1, unlock_a2=a2,
+                        progress=progress, log=log, cancel=cancel)
+                finally:
+                    self.dev.set_mode(gx.VOLTAGE_3_3V)
+                if not ok2:
+                    raise RuntimeError(msg)
+                log(msg)
+
+            self._start(write_job, "ROM write complete.")
+
+        self._start(check_job, "Flash cart checked.", after=after_check)
+
+    @staticmethod
+    def _unlock_addrs_for(variant: str) -> tuple:
+        """Map the probe's winning command-set variant to the unlock addresses
+        the erase/program sequences should use. Defaults to the standard
+        0xAAA/0x555 base, which is what the S29GL-family carts use."""
+        v = variant.replace("cfi-", "")
+        table = {
+            "555": (0x555, 0x2AA), "5555": (0x5555, 0x2AAA),
+            "AAA": (0xAAA, 0x555), "AAAA": (0xAAAA, 0x5555),
+            "4AAA": (0x4AAA, 0x4555), "7AAA": (0x7AAA, 0x7555),
+            "555/AA": (0x555, 0x2AA), "5555/AA": (0x5555, 0x2AAA),
+            "AAA/AA": (0xAAA, 0x555), "AAAA/AA": (0xAAAA, 0x5555),
+            "4AAA/AA": (0x4AAA, 0x4555), "7AAA/AA": (0x7AAA, 0x7555),
+        }
+        return table.get(v, (0xAAA, 0x555))
 
     def on_patch(self) -> None:
         from .patch_window import PatchDialog

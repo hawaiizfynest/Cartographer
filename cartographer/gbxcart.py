@@ -415,6 +415,13 @@ class GBxCart:
                 return True
         return False
 
+    # Settle delay after each flash command write, in seconds. Real hardware
+    # needs this (the finicky 5V repro carts miss commands without it); tests
+    # against a simulator set it to 0 so the write loop runs quickly.
+    flash_settle_s = 0.001
+    # Poll interval while waiting for a sector erase to finish, in seconds.
+    flash_poll_s = 0.1
+
     def gba_flash_write_address_byte(self, address: int, byte: int) -> None:
         """Write a command byte to the GBA flash cart bus. The address is halved
         (16-bit bus), then address and byte are each sent as an 'n' command.
@@ -427,10 +434,12 @@ class GBxCart:
         addr = address // 2
         s.write(f"{GBA_FLASH_CART_WRITE_BYTE}{addr:x}".encode("latin-1") + b"\x00")
         s.flush()
-        time.sleep(0.001)
+        if self.flash_settle_s:
+            time.sleep(self.flash_settle_s)
         s.write(f"{GBA_FLASH_CART_WRITE_BYTE}{byte:x}".encode("latin-1") + b"\x00")
         s.flush()
-        time.sleep(0.001)
+        if self.flash_settle_s:
+            time.sleep(self.flash_settle_s)
         self._wait_for_ack()
 
     def _gba_read8(self) -> bytes:
@@ -507,7 +516,8 @@ class GBxCart:
         done = False
         last = b""
         while _time.time() < deadline:
-            _time.sleep(0.1)
+            if self.flash_poll_s:
+                _time.sleep(self.flash_poll_s)
             last = self._gba_read_bytes_at(sector_addr, 2)
             if len(last) >= 2 and last[0] == 0xFF and last[1] == 0xFF:
                 done = True
@@ -533,6 +543,139 @@ class GBxCart:
             _log(f"  Sector erase verify FAILED: byte {nonff} is "
                  f"0x{sample[nonff]:02X}, expected 0xFF.")
         return all_ff, sample
+
+    def gba_flash_program_word(self, byte_addr: int, word: int,
+                               unlock_a1: int = 0xAAA,
+                               unlock_a2: int = 0x555) -> None:
+        """Program one 16-bit word at `byte_addr` using the AMD program command.
+
+        Sequence: unlock (a1=0xAA, a2=0x55), program setup (a1=0xA0), then write
+        the data word at its address. One word per call. This is the standard
+        S29GL/AMD single-word program the reference flasher uses for host-driven
+        writes. The chip must already be erased at this address (program can only
+        clear bits, not set them). Caller handles verification.
+        """
+        self.gba_flash_write_address_byte(unlock_a1, 0xAA)
+        self.gba_flash_write_address_byte(unlock_a2, 0x55)
+        self.gba_flash_write_address_byte(unlock_a1, 0xA0)   # program setup
+        self.gba_flash_write_address_byte(byte_addr, word)   # data word
+
+    def gba_flash_write_rom(self, data: bytes, erase_regions,
+                            unlock_a1: int = 0xAAA, unlock_a2: int = 0x555,
+                            progress=None, log=None, cancel=None) -> tuple:
+        """Write a full ROM to the flash cart, erasing and verifying as it goes.
+
+        This is the assembled write path: for each flash sector the ROM touches,
+        erase-and-verify the sector, program its words, then read the sector back
+        and confirm it matches the file. Any failure stops the write immediately
+        and reports where. Verification after every sector means a bad write can
+        never be reported as good.
+
+        `erase_regions` is the CFI sector map: a sequence of (sector_size_bytes,
+        sector_count). `data` is the ROM bytes. Assumes GBA mode and 5V are set.
+
+        Returns (ok, message). ok is True only if the whole ROM wrote and every
+        sector verified. On failure, message says exactly which sector and why.
+
+        Slow by nature: one word per serial round-trip. Safe to cancel; a partial
+        write leaves a re-flashable cart, not a brick.
+        """
+        import time as _time
+
+        def _log(msg: str) -> None:
+            if log:
+                log(msg)
+
+        def _cancelled() -> bool:
+            return bool(cancel and cancel())
+
+        # Build the flat list of sector boundaries from the CFI region map.
+        sectors = []          # (start_byte_addr, size_bytes)
+        addr = 0
+        for size, count in erase_regions:
+            for _ in range(count):
+                sectors.append((addr, size))
+                addr += size
+        total_size = addr
+        if not sectors:
+            return False, "No sector map available; cannot write safely."
+
+        if len(data) > total_size:
+            return False, (f"ROM is {len(data)} bytes but the chip holds "
+                           f"{total_size}. Refusing to write past the end.")
+
+        _log(f"Writing {len(data)} bytes across up to {len(sectors)} sectors. "
+             f"This is slow (one word at a time); progress is per sector.")
+
+        written = 0
+        for idx, (sec_addr, sec_size) in enumerate(sectors):
+            if sec_addr >= len(data):
+                break          # ROM shorter than the chip; nothing left to write
+            if _cancelled():
+                self.gba_flash_reset()
+                return False, (f"Cancelled at sector {idx} (0x{sec_addr:X}). "
+                               f"The cart holds a partial ROM and can be "
+                               f"rewritten.")
+
+            chunk = data[sec_addr:sec_addr + sec_size]
+            # Pad the final short chunk with 0xFF (erased value).
+            if len(chunk) < sec_size:
+                chunk = chunk + b"\xFF" * (sec_size - len(chunk))
+
+            # Skip sectors that are entirely 0xFF: erase already leaves them 0xFF,
+            # so there is nothing to program. Still erase them so a previous ROM's
+            # data is cleared.
+            _log(f"Sector {idx + 1}/{len(sectors)} at 0x{sec_addr:X} "
+                 f"({sec_size // 1024} KB)\u2026")
+
+            ok, _sample = self.gba_flash_erase_sector(
+                sec_addr, unlock_a1=unlock_a1, unlock_a2=unlock_a2,
+                verify_len=min(0x80, sec_size), log=None)
+            if not ok:
+                self.gba_flash_reset()
+                return False, (f"Sector {idx} at 0x{sec_addr:X} failed to erase "
+                               f"or verify. Write stopped; nothing past this "
+                               f"point was touched.")
+
+            all_ff = all(b == 0xFF for b in chunk)
+            if not all_ff:
+                # Program the sector one word at a time.
+                for off in range(0, sec_size, 2):
+                    if _cancelled():
+                        self.gba_flash_reset()
+                        return False, (f"Cancelled while programming sector "
+                                       f"{idx} (0x{sec_addr:X}). Partial ROM on "
+                                       f"cart; can be rewritten.")
+                    lo = chunk[off]
+                    hi = chunk[off + 1] if off + 1 < len(chunk) else 0xFF
+                    word = lo | (hi << 8)
+                    if word == 0xFFFF:
+                        continue      # already erased to 0xFF
+                    self.gba_flash_program_word(
+                        sec_addr + off, word,
+                        unlock_a1=unlock_a1, unlock_a2=unlock_a2)
+                self.gba_flash_reset()
+
+                # Verify the whole sector reads back matching the file.
+                readback = self._gba_read_bytes_at(sec_addr, sec_size)
+                if readback != chunk:
+                    mism = next((i for i in range(min(len(readback), len(chunk)))
+                                 if readback[i] != chunk[i]), 0)
+                    got = readback[mism] if mism < len(readback) else -1
+                    exp = chunk[mism] if mism < len(chunk) else -1
+                    self.gba_flash_reset()
+                    return False, (f"Sector {idx} at 0x{sec_addr:X} verify "
+                                   f"FAILED at byte {mism}: got 0x{got:02X}, "
+                                   f"expected 0x{exp:02X}. Write stopped.")
+
+            written += sec_size
+            if progress:
+                progress(min(written, len(data)), len(data))
+
+        self.gba_flash_reset()
+        _log("Write complete. All sectors erased, programmed and verified.")
+        return True, (f"Wrote and verified {len(data)} bytes. The ROM is on the "
+                      f"cart and reads back matching the file.")
 
     # Flash-ID unlock sequences. Each is (name, (a1,d1), (a2,d2), (a3,d3), reset)
     # where the three writes enter read-ID mode and reset returns to read mode.

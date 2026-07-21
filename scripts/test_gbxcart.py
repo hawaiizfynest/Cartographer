@@ -152,25 +152,56 @@ class FakeSerial:
     _erased_flash = False
     _rom_sector_size = 0x20000    # 128 KB sectors, matching the CFI sim
     _erased_rom_sectors = None    # set of erased sector base addresses
+    _programmed_words = None      # {byte_addr: word} programmed after erase
 
     def _erase_rom_sector(self, sector_byte_addr):
         # Mark the 128 KB sector containing this address as erased. A real chip
-        # erases the aligned sector, so snap down to the sector boundary.
+        # erases the aligned sector, so snap down to the sector boundary. Erasing
+        # also clears any words previously programmed into that sector.
         if self._erased_rom_sectors is None:
             self._erased_rom_sectors = set()
+        if self._programmed_words is None:
+            self._programmed_words = {}
         base = (sector_byte_addr // self._rom_sector_size) * self._rom_sector_size
         self._erased_rom_sectors.add(base)
+        end = base + self._rom_sector_size
+        for a in [k for k in self._programmed_words if base <= k < end]:
+            del self._programmed_words[a]
+
+    def _program_rom_word(self, byte_addr, word):
+        # Program a 16-bit word. Real NOR flash can only clear bits (AND), and
+        # only within an erased sector. Model that: the word ANDs with whatever
+        # is currently there (0xFFFF if erased). Store low and high bytes.
+        if self._programmed_words is None:
+            self._programmed_words = {}
+        base = (byte_addr // self._rom_sector_size) * self._rom_sector_size
+        erased = self._erased_rom_sectors and base in self._erased_rom_sectors
+        # Current value at this address (0xFFFF if erased, else original ROM).
+        if erased:
+            cur = 0xFFFF
+        else:
+            lo = self.rom[byte_addr] if byte_addr < len(self.rom) else 0xFF
+            hi = self.rom[byte_addr + 1] if byte_addr + 1 < len(self.rom) else 0xFF
+            cur = lo | (hi << 8)
+        if byte_addr in self._programmed_words:
+            cur = self._programmed_words[byte_addr]
+        self._programmed_words[byte_addr] = cur & word   # AND: can only clear
 
     def _effective_rom(self):
-        # The ROM as the host would read it: erased sectors read back as 0xFF.
-        if not self._erased_rom_sectors:
+        # The ROM as the host would read it: erased sectors read back as 0xFF,
+        # then any programmed words overlaid on top.
+        if not self._erased_rom_sectors and not self._programmed_words:
             return self.rom
         buf = bytearray(self.rom)
-        for base in self._erased_rom_sectors:
+        for base in (self._erased_rom_sectors or set()):
             end = min(base + self._rom_sector_size, len(buf))
             if base < len(buf):
                 for i in range(base, end):
                     buf[i] = 0xFF
+        for a, word in (self._programmed_words or {}).items():
+            if a + 1 < len(buf):
+                buf[a] = word & 0xFF
+                buf[a + 1] = (word >> 8) & 0xFF
         return bytes(buf)
 
     def _handle_flash_byte(self, hexstr):
@@ -219,6 +250,21 @@ class FakeSerial:
             self._flash_cmd = []
             return
         self._flash_cmd.append((addr, val))
+        # Recognise the AMD program sequence: a1=0xAA, a2=0x55, a1=0xA0, PA=data.
+        # The 4th write carries the data word at its (halved) program address.
+        if self.cfi_variant is not None and len(self._flash_cmd) >= 4:
+            last4 = self._flash_cmd[-4:]
+            v4 = tuple(v for _a, v in last4)
+            # Match on the first three being the unlock+setup; the 4th is data.
+            if v4[0] == 0xAA and v4[1] == 0x55 and v4[2] == 0xA0:
+                if self.requires_5v and self._voltage != 5:
+                    self._flash_cmd = []
+                    return
+                prog_halved = last4[3][0]
+                prog_byte_addr = prog_halved * 2
+                self._program_rom_word(prog_byte_addr, val)
+                self._flash_cmd = []
+                return
         # Recognise the AMD sector-erase sequence ending in 0x30:
         # a1=0xAA, a2=0x55, a1=0x80, a1=0xAA, a2=0x55, SA=0x30 (halved addrs).
         # The chip requires 5V like everything else on these repro carts.
@@ -754,6 +800,65 @@ def test_sector_erase_requires_5v():
                                              unlock_a2=0x555, verify_len=0x80,
                                              timeout_s=2.0)
     assert ok is False, "erase at 3.3V must not verify as succeeded"
+
+
+def test_write_rom_end_to_end_verifies():
+    # v1.0.12: writing a ROM must erase, program, and read back matching. Use a
+    # small ROM the sim can hold: two 128 KB sectors, a distinctive pattern that
+    # differs from the original ROM so the write is actually doing something.
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x40000))    # 256 KB start
+    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x30000))  # 192 KB new ROM
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    dev = _connect(fake)
+    dev.flash_settle_s = 0        # no real-hardware delays in the simulator
+    dev.flash_poll_s = 0
+    dev.select_gba()
+    dev.set_mode(gx.VOLTAGE_5V)
+    # CFI map: 128 KB sectors. 256 KB chip = 2 sectors.
+    regions = ((0x20000, 2),)
+    ok, msg = dev.gba_flash_write_rom(new_rom, regions, unlock_a1=0xAAA,
+                                      unlock_a2=0x555)
+    assert ok is True, f"write should succeed: {msg}"
+    # Read the ROM back and confirm the written region matches the file.
+    dev.set_mode(gx.VOLTAGE_5V)
+    readback = dev._gba_read_bytes_at(0x0, len(new_rom))
+    assert readback == new_rom, "written ROM must read back byte-for-byte"
+
+
+def test_write_rom_refuses_oversize():
+    # A ROM larger than the chip must be refused, not written past the end.
+    orig = bytes(0x40000)
+    big = bytes(0x50000)   # bigger than the 2x128KB = 256 KB map below
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    dev = _connect(fake)
+    dev.flash_settle_s = 0
+    dev.flash_poll_s = 0
+    dev.select_gba()
+    dev.set_mode(gx.VOLTAGE_5V)
+    ok, msg = dev.gba_flash_write_rom(big, ((0x20000, 2),))
+    assert ok is False
+    assert "past the end" in msg or "holds" in msg
+
+
+def test_write_rom_stops_on_bad_verify():
+    # If a sector won't erase (sim at 3.3V), the write must stop and report it,
+    # never claiming success.
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x40000))
+    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x20000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    dev = _connect(fake)
+    dev.flash_settle_s = 0
+    dev.flash_poll_s = 0
+    dev.select_gba()             # 3.3V - erase will be ignored by the chip
+    ok, msg = dev.gba_flash_write_rom(new_rom, ((0x20000, 2),))
+    assert ok is False
+    assert "erase" in msg.lower()
 
 
 def test_flash_id_probe_5v_repro_cart():
