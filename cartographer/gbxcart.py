@@ -489,14 +489,15 @@ class GBxCart:
         ("bare",  0x0,    0x0,    0x0,    0x0),
     )
 
-    def _gba_cfi_query(self) -> tuple[str, bytes]:
+    def _gba_cfi_query(self) -> tuple[str, bytes, bytes]:
         """Find the chip's CFI table and read its ID from the matching base.
 
         Mirrors the reference flasher: for each address base, reset the chip,
         send the CFI query command (0x98), read a 0x400 buffer, and look for the
         "QRY" signature at byte offsets 0x20/0x22/0x24. When found, that base is
         the right one; issue its read-identifier command (0x90) and read the
-        manufacturer/device ID. Returns (method_name, id_bytes) or ("", b"").
+        manufacturer/device ID. Returns (method_name, id_bytes, cfi_buffer) or
+        ("", b"", b"").
 
         Read-only: only enters and exits CFI/ID mode, never erases or programs.
         """
@@ -526,8 +527,8 @@ class GBxCart:
                 self.gba_flash_write_address_byte(a1, 0x90)
             ident = self._gba_read_bytes(8)
             self.gba_flash_write_address_byte(reset_addr, 0xF0)
-            return name, ident
-        return "", b""
+            return name, ident, buf
+        return "", b"", b""
 
     def gba_flash_intel_reset(self) -> None:
         """Intel chips leave read-ID mode with 0xFF, not 0xF0."""
@@ -583,9 +584,11 @@ class GBxCart:
             # than the bare unlock-and-read below, which can read a partial ID.
             # The finicky carts answer intermittently, so try a few times.
             for _attempt in range(3):
-                cfi_name, cfi_id = self._gba_cfi_query()
+                cfi_name, cfi_id, cfi_buf = self._gba_cfi_query()
                 if cfi_id and cfi_id[:4] != results["baseline"][:4]:
                     results["cfi-" + cfi_name] = cfi_id
+                    if cfi_buf:
+                        results["_cfi_buffer"] = cfi_buf
                     break
                 self.gba_flash_reset()
                 time.sleep(0.01)

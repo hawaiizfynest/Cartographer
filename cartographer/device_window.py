@@ -1177,6 +1177,8 @@ class DeviceWindow(QMainWindow):
         def job(progress, log, cancel):
             probe = self.dev.gba_flash_id_probe()
             for name, data in probe.items():
+                if name.startswith("_"):
+                    continue   # internal buffers (e.g. raw CFI), not for display
                 log(f"  {name}: " + " ".join(f"{b:02X}" for b in data[:8]))
             result = flash_db.interpret(probe)
             baseline = probe.get("baseline", b"")

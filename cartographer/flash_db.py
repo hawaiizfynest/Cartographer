@@ -128,10 +128,15 @@ class FlashIdResult:
     manufacturer: str
     chip: object = None          # ChipInfo | None
     raw: dict = None
+    cfi: object = None           # CfiData | None (parsed from the CFI buffer)
 
     @property
     def chip_label(self) -> str:
+        # Prefer the true CFI size over the nominal database capacity, since
+        # 0x227E-family chips share an id across several sizes.
         if self.chip:
+            if self.cfi and self.cfi.device_size_bytes:
+                return f"{self.chip.name}, {self.cfi.device_size_mb} MB"
             cap = f", {self.chip.capacity_mb} MB" if self.chip.capacity_mb else ""
             return f"{self.chip.name}{cap}"
         return "Unknown chip"
@@ -150,13 +155,119 @@ class FlashIdResult:
             base = (f"Flashable cart: {self.chip_label} ({who}, {ids}). "
                     f"Command set {self.variant}, write method "
                     f"'{self.write_method}'.")
-            if self.chip.note:
+            if self.cfi and self.cfi.summary():
+                base += f" CFI: {self.cfi.summary()}."
+            elif self.chip.note:
                 base += f" Note: {self.chip.note}."
             return base
-        return (f"Flashable cart, but this chip is not in the database: {who}, "
+        base = (f"Flashable cart, but this chip is not in the database: {who}, "
                 f"{ids}. Command set {self.variant}, write method "
-                f"'{self.write_method}'. Cross-check the marking printed on the "
-                f"chip against the supported list before writing.")
+                f"'{self.write_method}'.")
+        if self.cfi and self.cfi.summary():
+            base += f" CFI: {self.cfi.summary()}."
+        base += (" Cross-check the marking printed on the chip against the "
+                 "supported list before writing.")
+        return base
+
+
+@dataclass
+class CfiData:
+    """Parsed Common Flash Interface data - the chip's own description of its
+    size, sector layout, and erase/write capabilities. Read straight off the
+    chip; this is the ground truth a correct erase needs."""
+    device_size_bytes: int = 0          # true capacity in bytes
+    sector_erase: bool = False          # supports per-sector erase
+    chip_erase: bool = False            # supports whole-chip erase
+    single_write: bool = False          # supports single-word program
+    buffer_write: bool = False          # supports buffered (fast) program
+    buffer_size: int = 0                # buffered write size in bytes (0 = none)
+    # Each region is (sector_size_bytes, sector_count). A chip has 1-4 regions.
+    erase_regions: tuple = ()
+    tb_boot_raw: int = 0                # top/bottom boot flag (0x03 = reversed)
+
+    @property
+    def device_size_mb(self) -> int:
+        return self.device_size_bytes // (1024 * 1024)
+
+    def summary(self) -> str:
+        if not self.device_size_bytes:
+            return ""
+        parts = [f"{self.device_size_mb} MB"]
+        caps = []
+        if self.sector_erase:
+            caps.append("sector-erase")
+        if self.chip_erase:
+            caps.append("chip-erase")
+        if self.buffer_write:
+            caps.append(f"buffered-write({self.buffer_size}B)")
+        elif self.single_write:
+            caps.append("single-write")
+        if caps:
+            parts.append(", ".join(caps))
+        if self.erase_regions:
+            regions = "; ".join(f"{n}x{sz // 1024}KB" for sz, n in
+                                self.erase_regions)
+            parts.append(f"sectors: {regions}")
+        return " | ".join(parts)
+
+
+def parse_cfi(buffer: bytes) -> "CfiData | None":
+    """Parse a 0x400 CFI buffer into a CfiData, or None if it isn't valid CFI.
+
+    Mirrors the reference flasher's parser (offsets are on the 16-bit bus, so the
+    CFI bytes land at every other byte: 0x20, 0x22, 0x24 for the "QRY" magic,
+    etc). Only reads the buffer - never touches the device.
+    """
+    if len(buffer) < 0x62:
+        return None
+    # "QRY" signature at 0x20/0x22/0x24.
+    if not (buffer[0x20] == ord("Q") and buffer[0x22] == ord("R")
+            and buffer[0x24] == ord("Y")):
+        return None
+    try:
+        # Voltage range must be present, else the CFI is bogus.
+        if buffer[0x36] == 0xFF and buffer[0x48] == 0xFF:
+            return None
+
+        single_write = 0 < buffer[0x3E] < 0xFF
+        buffer_write = 0 < buffer[0x40] < 0xFF
+        sector_erase = 0 < buffer[0x42] < 0xFF
+        chip_erase = 0 < buffer[0x44] < 0xFF
+
+        device_size = int(2 ** buffer[0x4E])
+
+        buf_size = (buffer[0x56] << 8) | buffer[0x54]
+        if buf_size > 1:
+            buffer_write = True
+            buf_size = int(2 ** buf_size)
+        else:
+            buf_size = 0
+            buffer_write = False
+
+        n_regions = buffer[0x58]
+        regions = []
+        for i in range(0, min(4, n_regions)):
+            count = ((buffer[0x5C + i * 8] << 8) | buffer[0x5A + i * 8]) + 1
+            size = ((buffer[0x60 + i * 8] << 8) | buffer[0x5E + i * 8]) * 256
+            regions.append((size, count))
+
+        tb_boot_raw = 0
+        pri = ((buffer[0x2A] | (buffer[0x2C] << 8)) * 2)
+        if (pri + 0x3C) < 0x400:
+            if (buffer[pri] == ord("P") and buffer[pri + 2] == ord("R")
+                    and buffer[pri + 4] == ord("I")):
+                v = buffer[pri + 0x1E]
+                if v not in (0, 0xFF):
+                    tb_boot_raw = v
+
+        return CfiData(
+            device_size_bytes=device_size,
+            sector_erase=sector_erase, chip_erase=chip_erase,
+            single_write=single_write, buffer_write=buffer_write,
+            buffer_size=buf_size, erase_regions=tuple(regions),
+            tb_boot_raw=tb_boot_raw)
+    except (IndexError, ValueError):
+        return None
 
 
 def _decode_ids(data: bytes) -> tuple[int, int, int, int]:
@@ -181,9 +292,11 @@ def lookup_chip(mfr: int, dev: int):
 def interpret(probe: dict) -> FlashIdResult:
     """Turn a gba_flash_id_probe() dict into a FlashIdResult."""
     baseline = probe.get("baseline", b"")
+    # Parse the CFI buffer once, if the probe captured one.
+    cfi = parse_cfi(probe.get("_cfi_buffer", b"")) if probe.get("_cfi_buffer") else None
     # CFI-confirmed results come first: a chip that answered a CFI query is
     # identified far more reliably than one read by a bare unlock sequence. CFI
-    # keys look like "cfi-555", "cfi-AAAA", etc.
+    # keys look like "cfi-555", "cfi-AAAA", etc. Skip internal "_"-prefixed keys.
     cfi_keys = sorted(k for k in probe if k.startswith("cfi-"))
     for variant in (*cfi_keys, *_PROBE_ORDER):
         data = probe.get(variant, b"")
@@ -204,7 +317,7 @@ def interpret(probe: dict) -> FlashIdResult:
                 write_method=method,
                 manufacturer_id=mfr_id, device_id=dev_id,
                 manufacturer=MANUFACTURERS.get(mfr_id & 0xFF, "Unknown"),
-                chip=chip, raw=probe)
+                chip=chip, raw=probe, cfi=cfi)
     return FlashIdResult(
         is_flashable=False, variant="", write_method=WRITE_UNKNOWN,
         manufacturer_id=0, device_id=0, manufacturer="Unknown", chip=None,

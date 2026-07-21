@@ -383,14 +383,41 @@ class FakeSerial:
         return bases.get(self.cfi_variant, 0x555) // 2
 
     def _cfi_buffer(self):
-        # Build a 0x400 CFI response: "QRY" at byte offsets 0x20/0x22/0x24, with
-        # the flash_id bytes at the front so an ID read still works. The rest is
-        # zero-filled, which is enough for the probe's QRY check.
+        # Build a 0x400 CFI response resembling a real S29GL512 (32 MB): "QRY" at
+        # byte offsets 0x20/0x22/0x24, flash_id at the front, plus the size and
+        # sector fields the parser reads. Enough to exercise parse_cfi end to end.
         buf = bytearray(0x400)
         buf[0x00:len(self.flash_id)] = self.flash_id
         buf[0x20] = ord("Q")
         buf[0x22] = ord("R")
         buf[0x24] = ord("Y")
+        # Primary-table address pointer (0x2A/0x2C) -> point at 0x80 region.
+        buf[0x2A] = 0x40
+        buf[0x2C] = 0x00
+        # Voltage range (must be present or parser rejects). vdd 2.7-3.6.
+        buf[0x36] = 0x27
+        buf[0x38] = 0x36
+        # Timing fields: single write present (0x3E), sector erase (0x42),
+        # chip erase (0x44), buffered write (0x40).
+        buf[0x3E] = 0x04     # single write ~16us
+        buf[0x40] = 0x06     # buffer write present
+        buf[0x42] = 0x0A     # sector erase ~1s
+        buf[0x44] = 0x0F     # chip erase present
+        buf[0x46] = 0x04
+        buf[0x48] = 0x04
+        buf[0x4A] = 0x04
+        buf[0x4C] = 0x04
+        # Device size: 2^0x19 = 32 MB.
+        buf[0x4E] = 0x19
+        # Buffer size: 2^5 = 32 bytes -> stored as log2 at 0x54/0x56.
+        buf[0x54] = 0x05
+        buf[0x56] = 0x00
+        # One erase region: 512 sectors of 128 KB (0x20000).
+        buf[0x58] = 0x01
+        buf[0x5A] = 0xFF     # (count-1) low  -> 0x01FF + 1 = 512
+        buf[0x5C] = 0x01     # (count-1) high
+        buf[0x5E] = 0x00     # size/256 low   -> 0x0200 * 256 = 128 KB
+        buf[0x60] = 0x02     # size/256 high
         return bytes(buf)
 
     def _begin_stream(self, data, cursor):
@@ -623,6 +650,36 @@ def test_flash_id_probe_cfi_clean_read():
     assert result.variant.startswith("cfi-")
     assert result.is_known_chip
     assert "S29GL" in result.chip_label
+
+
+def test_cfi_parsing_reads_true_size_and_sectors():
+    from cartographer import flash_db
+    # v1.0.10: the CFI buffer must parse into the chip's true size and sector map.
+    # The simulator presents a 32 MB S29GL512 with 512 x 128 KB sectors.
+    rom = bytes((i * 5 + 3) & 0xFF for i in range(0x1000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    dev = _connect(FakeSerial(rom=rom, mode=gx.GBA_MODE, flash_id=fid,
+                              flash_variant="none", requires_5v=True,
+                              cfi_variant="AAAA"))
+    result = flash_db.interpret(dev.gba_flash_id_probe())
+    assert result.cfi is not None, "CFI should have been parsed"
+    # True size is 32 MB, not the nominal 16 MB from the database.
+    assert result.cfi.device_size_mb == 32
+    assert result.cfi.sector_erase is True
+    assert result.cfi.chip_erase is True
+    # One region: 512 sectors of 128 KB.
+    assert result.cfi.erase_regions == ((0x20000, 512),)
+    # The label must now show the true 32 MB, overriding the 16 MB nominal.
+    assert "32 MB" in result.chip_label
+    # And the summary carries the CFI detail.
+    assert "CFI:" in result.summary()
+
+
+def test_cfi_parse_rejects_non_cfi():
+    from cartographer import flash_db
+    # A buffer without the QRY magic must not parse as CFI.
+    assert flash_db.parse_cfi(bytes(0x400)) is None
+    assert flash_db.parse_cfi(b"\x00" * 4) is None
 
 
 def test_flash_id_probe_5v_repro_cart():

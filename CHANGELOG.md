@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.10
+
+- Identify flash chip now reads the chip's true size and capabilities from its
+  Common Flash Interface data, instead of guessing from the device ID. The
+  S29GL-family carts all share device id 0x227E whether they are 16, 32, or 64
+  MB, so the ID alone can not tell them apart. The probe now parses the CFI table
+  it already reads and reports the real capacity, the sector layout, and whether
+  the chip supports sector erase, chip erase and buffered writes. This is
+  read-only and lays the groundwork for writing ROMs safely later: a correct
+  erase needs the exact sector map, and now the app can read it.
+
 ## v1.0.9
 
 - The flash chip identifier is more reliable on the finicky 5V repro carts. These
