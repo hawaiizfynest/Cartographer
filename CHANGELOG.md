@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.0.9
+
+- The flash chip identifier is more reliable on the finicky 5V repro carts. These
+  clone carts can answer a probe on one run and stay silent on the next depending
+  on what state they were left in. The probe now settles the bus after each
+  command the way the reference flasher does, clears the chip out of any stuck
+  mode before it starts, and retries the whole identification a few times before
+  giving up. A cart that reads intermittently should now identify on one of the
+  attempts rather than at random.
+
 ## v1.0.8
 
 - Identify flash chip now reads a clean, complete chip ID on the repro carts it

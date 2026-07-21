@@ -417,13 +417,20 @@ class GBxCart:
 
     def gba_flash_write_address_byte(self, address: int, byte: int) -> None:
         """Write a command byte to the GBA flash cart bus. The address is halved
-        (16-bit bus), then address and byte are each sent as an 'n' command."""
+        (16-bit bus), then address and byte are each sent as an 'n' command.
+
+        A short settle delay follows each write, matching the reference flasher.
+        The finicky 5V repro carts need this pause to register the command; without
+        it they intermittently miss commands and read back stale ROM data.
+        """
         s = self._require()
         addr = address // 2
         s.write(f"{GBA_FLASH_CART_WRITE_BYTE}{addr:x}".encode("latin-1") + b"\x00")
         s.flush()
+        time.sleep(0.001)
         s.write(f"{GBA_FLASH_CART_WRITE_BYTE}{byte:x}".encode("latin-1") + b"\x00")
         s.flush()
+        time.sleep(0.001)
         self._wait_for_ack()
 
     def _gba_read8(self) -> bytes:
@@ -557,6 +564,16 @@ class GBxCart:
         self.ser.reset_input_buffer()  # type: ignore[union-attr]
 
         try:
+            # Clear the chip out of any stuck mode it may have been left in by a
+            # previous operation. These repro carts can answer one run and stay
+            # silent the next depending on leftover state, so reset firmly first:
+            # both the AMD reset (0xF0) and the Intel reset (0xFF), at a couple of
+            # bank bases, before reading a clean baseline.
+            for rst_addr in (0x0, 0x4000, 0x7000):
+                self.gba_flash_write_address_byte(rst_addr, 0xF0)
+                self.gba_flash_write_address_byte(rst_addr, 0xFF)
+            time.sleep(0.01)
+
             results: dict[str, bytes] = {"baseline": self._gba_read8()}
             self.gba_flash_reset()
 
@@ -564,9 +581,14 @@ class GBxCart:
             # reads a clean manufacturer/device ID from the right base, the way
             # the reference flasher does. When it works it is far more reliable
             # than the bare unlock-and-read below, which can read a partial ID.
-            cfi_name, cfi_id = self._gba_cfi_query()
-            if cfi_id and cfi_id[:4] != results["baseline"][:4]:
-                results["cfi-" + cfi_name] = cfi_id
+            # The finicky carts answer intermittently, so try a few times.
+            for _attempt in range(3):
+                cfi_name, cfi_id = self._gba_cfi_query()
+                if cfi_id and cfi_id[:4] != results["baseline"][:4]:
+                    results["cfi-" + cfi_name] = cfi_id
+                    break
+                self.gba_flash_reset()
+                time.sleep(0.01)
             self.gba_flash_reset()
 
             # AMD-style unlock sequences across all the address bases (fallback
