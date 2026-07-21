@@ -1170,9 +1170,9 @@ class DeviceWindow(QMainWindow):
             QMessageBox.information(
                 self, __app_name__,
                 "Flash-ID probing here is for GBA flash carts. Set the switch to "
-                "GBA (3.3V) with the cart inserted.")
+                "GBA with the cart inserted.")
             return
-        self.log("Probing flash ID (non-destructive)\u2026")
+        self.log("Probing flash ID (non-destructive, forces 5V briefly)\u2026")
 
         def job(progress, log, cancel):
             probe = self.dev.gba_flash_id_probe()

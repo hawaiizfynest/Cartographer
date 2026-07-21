@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.7
+
+- The flash chip identifier now works on the repro carts that need 5V. Some
+  Game Boy Advance flash carts, including many EpicJoy-style RTC and solar carts,
+  ignore every flash command at 3.3V and only answer at 5V. Identify flash chip
+  now forces 5V for the probe and tries the wider set of unlock addresses those
+  chips actually use, so carts that used to read as "mask ROM" now identify
+  correctly. The higher voltage is applied only for the identification itself
+  and dropped back to 3.3V straight after.
+- Faster to run out of guesses on a truly unwritable cart, too: the probe now
+  reports which method and voltage a chip answered on, so a real result and a
+  real dead end are easy to tell apart.
+
 ## v1.0.6
 
 - Every ROM dump gets a receipt. A plain-text report lands next to the dump

@@ -439,12 +439,19 @@ class GBxCart:
         """Return the flash chip to normal read mode."""
         self.gba_flash_write_address_byte(0x000, 0xF0)
 
-    # The four AMD-style flash-ID command sets, plus Intel (probed separately).
+    # Flash-ID unlock sequences. Each is (name, (a1,d1), (a2,d2), (a3,d3), reset)
+    # where the three writes enter read-ID mode and reset returns to read mode.
+    # These are the exact address bases FlashGBX tries, in the same order. The
+    # 0xAAAA / 0x5555 and 0x4AAA / 0x7AAA bases are the ones the larger repro
+    # carts (S29GL256/512 family, device id 0x227E) actually answer on - the
+    # plain 0xAAA / 0x555 bases alone are not enough for those chips.
     FLASH_ID_VARIANTS = (
-        ("AAA/A9", (0xAAA, 0xA9), (0x555, 0x56), (0xAAA, 0x90)),
-        ("AAA/AA", (0xAAA, 0xAA), (0x555, 0x55), (0xAAA, 0x90)),
-        ("555/A9", (0x555, 0xA9), (0x2AA, 0x56), (0x555, 0x90)),
-        ("555/AA", (0x555, 0xAA), (0x2AA, 0x55), (0x555, 0x90)),
+        ("555/AA",   (0x555, 0xAA),  (0x2AA, 0x55),  (0x555, 0x90),  (0x0, 0xF0)),
+        ("5555/AA",  (0x5555, 0xAA), (0x2AAA, 0x55), (0x5555, 0x90), (0x0, 0xF0)),
+        ("AAA/AA",   (0xAAA, 0xAA),  (0x555, 0x55),  (0xAAA, 0x90),  (0x0, 0xF0)),
+        ("AAAA/AA",  (0xAAAA, 0xAA), (0x5555, 0x55), (0xAAAA, 0x90), (0x0, 0xF0)),
+        ("4AAA/AA",  (0x4AAA, 0xAA), (0x4555, 0x55), (0x4AAA, 0x90), (0x4000, 0xF0)),
+        ("7AAA/AA",  (0x7AAA, 0xAA), (0x7555, 0x55), (0x7AAA, 0x90), (0x7000, 0xF0)),
     )
 
     def gba_flash_intel_reset(self) -> None:
@@ -452,32 +459,55 @@ class GBxCart:
         self.gba_flash_write_address_byte(0x000, 0xFF)
 
     def gba_flash_id_probe(self) -> dict:
-        """Try each flash-ID command set and record what the cart returns.
+        """Try several flash-ID methods at 5V and record what the cart returns.
 
         Non-destructive: this only enters and exits the chip's read-ID mode and
         never issues an erase or program command. A retail (mask ROM) cart
         ignores the command writes and returns its normal ROM bytes.
 
-        Returns {'baseline': bytes, '<variant>': bytes, ...}. A variant whose
-        result differs from the baseline is the command set the chip responds to.
+        Why 5V: many GBA repro carts (the EpicJoy/Gugxiom S29GL256/512 family)
+        ignore every flash command at 3.3V and only answer at 5V. The genuine
+        GBxCart flasher forces 5V for exactly this reason. We raise to 5V for the
+        probe and drop back to 3.3V before returning, so a normal ROM read is
+        never left running at the higher voltage.
+
+        Methods tried, in order (all read-only):
+          * baseline    - a plain ROM read at 5V, for comparison
+          * 555/AA .. 7AAA/AA - the AMD-style unlock sequences across the address
+                          bases FlashGBX uses (the wider set repro carts need)
+          * bare-90     - a single 0x90 write to address 0 (Intel-type detect)
+
+        Returns {'baseline': bytes, '<method>': bytes, ...}. Any method whose
+        result differs from the baseline is the one the chip responds to.
         """
         self.select_gba()
+        # Force 5V for the probe. select_gba() set 3.3V; raise it now. This is the
+        # key that makes 0x227E-class repro carts answer at all.
+        self.set_mode(VOLTAGE_5V)
+        time.sleep(0.1)
         self.ser.reset_input_buffer()  # type: ignore[union-attr]
 
-        results: dict[str, bytes] = {"baseline": self._gba_read8()}
-        self.gba_flash_reset()
-
-        for name, c1, c2, c3 in self.FLASH_ID_VARIANTS:
-            for addr, val in (c1, c2, c3):
-                self.gba_flash_write_address_byte(addr, val)
-            results[name] = self._gba_read8()
+        try:
+            results: dict[str, bytes] = {"baseline": self._gba_read8()}
             self.gba_flash_reset()
 
-        # Intel command set: single 0x90 to address 0, reset with 0xFF.
-        self.gba_flash_write_address_byte(0x00, 0x90)
-        time.sleep(0.002)
-        results["Intel/90"] = self._gba_read8()
-        self.gba_flash_intel_reset()
+            # AMD-style unlock sequences across all the address bases.
+            for name, c1, c2, c3, rst in self.FLASH_ID_VARIANTS:
+                for addr, val in (c1, c2, c3):
+                    self.gba_flash_write_address_byte(addr, val)
+                results[name] = self._gba_read8()
+                # reset using this variant's reset address
+                self.gba_flash_write_address_byte(rst[0], rst[1])
+
+            # Intel-type: bare 0x90 to address 0, exit with 0xFF.
+            self.gba_flash_write_address_byte(0x00, 0x90)
+            time.sleep(0.002)
+            results["bare-90"] = self._gba_read8()
+            self.gba_flash_intel_reset()
+        finally:
+            # Always drop back to 3.3V so a subsequent plain read is safe.
+            self.set_mode(VOLTAGE_3_3V)
+            time.sleep(0.05)
 
         return results
 

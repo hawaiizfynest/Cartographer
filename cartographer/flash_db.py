@@ -29,22 +29,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Write methods (names mirror insideGadgets' flasher for continuity)
-WRITE_AAA = "aaa"                    # standard AMD-style, unlock 0xAAA/0x555
-WRITE_AAA_SWAPPED = "aaa_swapped"    # same but data lines D0/D1 swapped
+WRITE_AAA = "aaa"                    # standard AMD-style unlock (0xAAA/0x555 etc)
 WRITE_555 = "555"                    # unlock at 0x555/0x2AA
 WRITE_INTEL = "intel"                # Intel command set (0x90 id, reset 0xFF)
 WRITE_UNKNOWN = "unknown"
 
+# A chip that answers a lone 0x90 to address 0 ("bare-90") is Intel-type. The
+# AMD-style unlock sequences all use the standard AMD command set; the address
+# base that answers just tells us where the chip is mapped, not a different write
+# protocol, so they share the AMD write method.
 _VARIANT_TO_METHOD = {
-    "AAA/A9": WRITE_AAA_SWAPPED,
-    "AAA/AA": WRITE_AAA,
-    "555/A9": WRITE_555,
     "555/AA": WRITE_555,
-    "Intel/90": WRITE_INTEL,
+    "5555/AA": WRITE_555,
+    "AAA/AA": WRITE_AAA,
+    "AAAA/AA": WRITE_AAA,
+    "4AAA/AA": WRITE_AAA,
+    "7AAA/AA": WRITE_AAA,
+    "bare-90": WRITE_INTEL,
 }
 
 # Probe order: AMD-style sets first, Intel last (matches insideGadgets).
-_PROBE_ORDER = ("AAA/A9", "AAA/AA", "555/A9", "555/AA", "Intel/90")
+_PROBE_ORDER = ("555/AA", "5555/AA", "AAA/AA", "AAAA/AA",
+                "4AAA/AA", "7AAA/AA", "bare-90")
 
 
 # Standard JEDEC manufacturer ids.
@@ -74,7 +80,10 @@ class ChipInfo:
 # 0x227E is the standard device id for 128 Mbit (16 MByte) CFI NOR flash, used
 # by S29GL128 / M29W128 / MX29GL128 - the family found on most GBA repro carts.
 CHIP_IDS = {
-    (0x01, 0x227E): ChipInfo("Spansion S29GL128", 16),
+    (0x01, 0x227E): ChipInfo("Spansion S29GL128/256/512 family", 16,
+                             "device id 0x227E is shared across this family; "
+                             "true size (16-64 MB) comes from CFI. Common on "
+                             "EpicJoy/Gugxiom-style 5V repro carts."),
     (0x20, 0x227E): ChipInfo("ST/Numonyx M29W128 (e.g. M29W128GH)", 16,
                              "common on EpicJoy-style RTC/solar repro carts"),
     (0xC2, 0x227E): ChipInfo("Macronix MX29GL128", 16),

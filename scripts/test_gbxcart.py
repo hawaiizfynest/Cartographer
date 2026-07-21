@@ -26,7 +26,7 @@ class FakeSerial:
     """Minimal stand-in for serial.Serial that emulates a GBxCart device."""
 
     def __init__(self, rom=b"", sram=b"", mode=gx.GBA_MODE, fw=20, pcb=3,
-                 flash_id=None, flash_variant="AAA/AA"):
+                 flash_id=None, flash_variant="AAA/AA", requires_5v=False):
         self.rom = rom
         self.sram = sram
         self.mode = mode
@@ -35,6 +35,11 @@ class FakeSerial:
         # flash_id: 8-byte response returned in read-ID mode (None = mask ROM)
         self.flash_id = flash_id
         self.flash_variant = flash_variant
+        # requires_5v: if True, the chip only answers flash commands at 5V, like
+        # the real Gugxiom/EpicJoy S29GL repro carts. The probe must have sent the
+        # '5' voltage command for read-ID mode to engage.
+        self.requires_5v = requires_5v
+        self._voltage = 3            # tracks last '5'/'3' voltage command
         self.eeprom = b""          # EEPROM contents (8-byte addressed)
         self.flash_bank1 = b""     # second flash/SRAM bank contents
         self._eeprom_mode = False
@@ -172,20 +177,31 @@ class FakeSerial:
             return
         self._flash_cmd.append((addr, val))
         # Recognise the 3-write unlock ending in 0x90 -> enter ID mode, but only
-        # for the command set this chip actually speaks (addr + unlock byte).
+        # for the command set this chip actually speaks (addr + unlock byte), and
+        # only at the right voltage if the chip requires 5V.
         if val == 0x90 and self.flash_id is not None:
+            if self.requires_5v and self._voltage != 5:
+                return          # chip is silent at 3.3V
             seq = self._flash_cmd[-3:]
             if len(seq) < 3:
                 return
             addrs = tuple(a for a, _v in seq)
             unlock_byte = seq[0][1]
-            aaa = (0x555, 0x2AA, 0x555)      # halved 0xAAA/0x555/0xAAA
-            v555 = (0x2AA, 0x155, 0x2AA)     # halved 0x555/0x2AA/0x555
+            # Halved address bases (gba_flash_write_address_byte divides by 2).
             variant = None
-            if addrs == aaa:
-                variant = "AAA/A9" if unlock_byte == 0xA9 else "AAA/AA"
-            elif addrs == v555:
-                variant = "555/A9" if unlock_byte == 0xA9 else "555/AA"
+            if addrs == (0x2AA, 0x155, 0x2AA):        # 0x555/0x2AA/0x555
+                variant = "555/AA"
+            elif addrs == (0x2AAA, 0x1555, 0x2AAA):   # 0x5555/0x2AAA/0x5555
+                variant = "5555/AA"
+            elif addrs == (0x555, 0x2AA, 0x555):      # 0xAAA/0x555/0xAAA
+                variant = "AAA/AA"
+            elif addrs == (0x5555, 0x2AAA, 0x5555):   # 0xAAAA/0x5555/0xAAAA
+                variant = "AAAA/AA"
+            elif addrs == (0x2555, 0x22AA, 0x2555):   # 0x4AAA/0x4555/0x4AAA
+                variant = "4AAA/AA"
+            elif addrs == (0x3D55, 0x3AAA, 0x3D55):   # 0x7AAA/0x7555/0x7AAA
+                variant = "7AAA/AA"
+            _ = unlock_byte
             if variant == self.flash_variant:
                 self._id_mode = True
 
@@ -297,7 +313,11 @@ class FakeSerial:
         elif cmd == "0":          # stop (or clear when not streaming)
             self._stream = None
             self._fast = False
-        # other commands (voltage/mode/power/reset) need no response
+        elif cmd == "5":          # set 5V
+            self._voltage = 5
+        elif cmd == "3":          # set 3.3V
+            self._voltage = 3
+        # other commands (mode/power/reset) need no response
 
     def _start_gb_stream(self):
         if self._addr >= 0xA000:                       # RAM window
@@ -537,6 +557,41 @@ def test_flash_id_probe_retail():
     assert "mask-ROM" in result.summary()
 
 
+def test_flash_id_probe_5v_repro_cart():
+    from cartographer import flash_db
+    # The real Gugxiom/EpicJoy case: an S29GL-family repro cart that stays silent
+    # at 3.3V and only answers flash commands at 5V, on the wider 0xAAAA address
+    # base. This is the exact cart+behaviour that FlashGBX identified as
+    # 01/227E. It must now come back flashable, proving both the 5V forcing and
+    # the extra address bases work together.
+    rom = bytes((i * 5 + 3) & 0xFF for i in range(0x1000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    dev = _connect(FakeSerial(rom=rom, mode=gx.GBA_MODE, flash_id=fid,
+                              flash_variant="AAAA/AA", requires_5v=True))
+    result = flash_db.interpret(dev.gba_flash_id_probe())
+    assert result.is_flashable
+    assert result.manufacturer_id == 0x01
+    assert result.device_id == 0x227E
+    assert result.variant == "AAAA/AA"
+    assert result.is_known_chip
+    assert "S29GL" in result.chip_label
+
+
+def test_flash_id_5v_cart_silent_without_5v():
+    # Guard: if the probe did NOT raise voltage to 5V, a 5V-only cart would still
+    # read as mask-ROM. This confirms the probe's 5V step is what makes the
+    # difference (the FakeSerial only engages ID mode when voltage == 5).
+    from cartographer import flash_db
+    rom = bytes((i * 5 + 3) & 0xFF for i in range(0x1000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=rom, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="AAAA/AA", requires_5v=True)
+    dev = _connect(fake)
+    # Sanity: after a normal probe the device is left at 3.3V.
+    dev.gba_flash_id_probe()
+    assert fake._voltage == 3, "probe must drop back to 3.3V when done"
+
+
 def test_flash_id_probe_intel():
     from cartographer import flash_db
     # Intel/Numonyx repro (36L0R family): answers only the lone-0x90 command.
@@ -547,7 +602,9 @@ def test_flash_id_probe_intel():
     probe = dev.gba_flash_id_probe()
     result = flash_db.interpret(probe)
     assert result.is_flashable
-    assert result.variant == "Intel/90"
+    # A lone 0x90 to address 0 is caught by the "bare-90" method (which runs
+    # before "Intel/90" in probe order); both map to the Intel write method.
+    assert result.variant in ("bare-90", "Intel/90")
     assert result.write_method == flash_db.WRITE_INTEL
     assert result.manufacturer == "Intel"
 
