@@ -2,17 +2,20 @@
 
 ## v1.1.0
 
-- Added an experimental test for fast block writing. The current ROM write is
-  reliable but slow because it programs one word at a time over the cable. The
-  device firmware also has a block-write command that programs a whole 256-byte
-  block on the cart at once, which would be far faster. Whether that command
-  drives a given flash chip correctly depends on the chip, so this is added as a
-  test first: Tools > Test fast block write erases sector 0, writes one test
-  block with the fast command, reads it back, and reports whether it landed
-  correctly (including detecting the data-line-swapped case some repro carts
-  need). It only touches sector 0 and needs a typed confirmation. If the test
-  passes on a cart, a full fast-write mode can be built on the same command; if
-  it does not, the reliable word-at-a-time write is there unchanged.
+- Fast ROM writing. Writing a ROM used to program one word at a time over the
+  cable, which was reliable but slow (hours for a large game). The device
+  firmware also has a block-write command that programs a whole 256-byte block on
+  the cart at once, which is far faster. Write ROM to flash cart now checks
+  whether that command works on the cart (a quick one-block test, including the
+  data-line-swapped case some repro carts need) and, if it does, uses it for the
+  whole write. The safety design is unchanged: every sector is erased, written,
+  then read back and checked against the file, and the write stops at the first
+  mismatch. If the fast command does not verify on a cart, the write falls back
+  to the reliable word-at-a-time path automatically. In practice this turns a
+  multi-hour write into minutes.
+- The fast-write check is also available on its own as Tools > Test fast block
+  write, which erases sector 0, writes one test block, and reports whether the
+  fast command works, without writing a whole ROM.
 
 ## v1.0.15
 

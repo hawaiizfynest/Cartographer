@@ -856,6 +856,45 @@ def test_sector_erase_requires_5v():
     assert ok is False, "erase at 3.3V must not verify as succeeded"
 
 
+def test_write_rom_fast_end_to_end_verifies():
+    # v1.1.0: the fast block-write path must erase, block-write, and verify a
+    # multi-sector ROM byte-for-byte, same as the slow path but via 'f' blocks.
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x4000))
+    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x2800))   # 10 KB, 3 sectors
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000
+    dev = _connect(fake)
+    dev.flash_settle_s = 0
+    dev.flash_poll_s = 0
+    dev.select_gba()
+    dev.set_mode(gx.VOLTAGE_5V)
+    ok, msg = dev.gba_flash_write_rom_fast(new_rom, ((0x1000, 4),),
+                                           block_command="f")
+    assert ok is True, f"fast write should succeed: {msg}"
+    dev.set_mode(gx.VOLTAGE_5V)
+    readback = dev._gba_read_bytes_at(0x0, len(new_rom))
+    assert readback == new_rom, "fast-written ROM must read back byte-for-byte"
+
+
+def test_write_rom_fast_stops_on_bad_erase():
+    # Fast path must also stop cleanly if a sector won't erase (sim at 3.3V).
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x4000))
+    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x1000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000
+    dev = _connect(fake)
+    dev.flash_settle_s = 0
+    dev.flash_poll_s = 0
+    dev.select_gba()             # 3.3V - erase ignored
+    ok, msg = dev.gba_flash_write_rom_fast(new_rom, ((0x1000, 4),))
+    assert ok is False
+    assert "erase" in msg.lower()
+
+
 def test_block_write_probe_f_command_works():
     # v1.1.0: the 'f' block command should program this non-swapped chip
     # correctly, and the probe should confirm it by read-back.

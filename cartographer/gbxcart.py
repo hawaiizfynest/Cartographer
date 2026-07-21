@@ -666,6 +666,120 @@ class GBxCart:
         _log(f"  Block-write test FAILED: {why}.")
         return False, readback, f"Block-write command '{block_command}' failed: {why}."
 
+    def gba_flash_write_rom_fast(self, data: bytes, erase_regions,
+                                 block_command: str = "f",
+                                 block_size: int = 256,
+                                 progress=None, log=None, cancel=None) -> tuple:
+        """Write a full ROM using the firmware block-write command (fast path).
+
+        Same safety design as the word-at-a-time write: for each sector, erase
+        and verify it, block-write it, then read the whole sector back and confirm
+        it matches the file. Any failure stops immediately and reports where.
+
+        The speed comes from block_command (e.g. 'f'): the host sets the address
+        once per sector, then streams block_size-byte blocks that the firmware
+        programs on the device, instead of one word per serial round-trip. Use
+        gba_flash_block_write_probe first to confirm the command works on the
+        chip; passing the wrong command would write wrong data (still caught by
+        the per-sector verify, but wasteful).
+
+        `erase_regions` is the CFI sector map. Assumes GBA mode and 5V are set.
+        Returns (ok, message). Safe to cancel; a partial write is re-flashable.
+        """
+        def _log(msg: str) -> None:
+            if log:
+                log(msg)
+
+        def _cancelled() -> bool:
+            return bool(cancel and cancel())
+
+        sectors = []
+        addr = 0
+        for size, count in erase_regions:
+            for _ in range(count):
+                sectors.append((addr, size))
+                addr += size
+        total_size = addr
+        if not sectors:
+            return False, "No sector map available; cannot write safely."
+        if len(data) > total_size:
+            return False, (f"ROM is {len(data)} bytes but the chip holds "
+                           f"{total_size}. Refusing to write past the end.")
+
+        _log(f"Writing {len(data)} bytes across up to {len(sectors)} sectors "
+             f"using fast block writes ({block_size}-byte blocks).")
+
+        written = 0
+        try:
+            for idx, (sec_addr, sec_size) in enumerate(sectors):
+                if sec_addr >= len(data):
+                    break
+                if _cancelled():
+                    self.gba_flash_reset()
+                    return False, (f"Cancelled at sector {idx} (0x{sec_addr:X}). "
+                                   f"Partial ROM on cart; can be rewritten.")
+
+                chunk = data[sec_addr:sec_addr + sec_size]
+                if len(chunk) < sec_size:
+                    chunk = chunk + b"\xFF" * (sec_size - len(chunk))
+
+                _log(f"Sector {idx + 1}/{len(sectors)} at 0x{sec_addr:X} "
+                     f"({sec_size // 1024} KB)\u2026")
+
+                ok, _sample = self.gba_flash_erase_sector(sec_addr, log=None)
+                if not ok:
+                    self.gba_flash_reset()
+                    return False, (f"Sector {idx} at 0x{sec_addr:X} failed to "
+                                   f"erase or verify. Write stopped.")
+
+                # Block-write the sector. Set the address once; the firmware
+                # auto-advances across consecutive blocks. After skipping an
+                # all-0xFF block (already erased), the address must be re-set.
+                self.set_number(sec_addr // 2, SET_START_ADDRESS)
+                skipping = False
+                for off in range(0, sec_size, block_size):
+                    if _cancelled():
+                        self.gba_flash_reset()
+                        return False, (f"Cancelled while writing sector {idx} "
+                                       f"(0x{sec_addr:X}). Partial ROM; can be "
+                                       f"rewritten.")
+                    block = chunk[off:off + block_size]
+                    if len(block) < block_size:
+                        block = block + b"\xFF" * (block_size - len(block))
+                    if block == b"\xFF" * block_size:
+                        skipping = True          # erased already; skip
+                        continue
+                    if skipping:
+                        # Re-set the address after a skip broke auto-advance.
+                        self.set_number((sec_addr + off) // 2, SET_START_ADDRESS)
+                        skipping = False
+                    self.write_block(block_command, block)
+                self.gba_flash_reset()
+
+                # Verify the whole sector reads back matching the file.
+                readback = self._gba_read_bytes_at(sec_addr, sec_size)
+                if readback != chunk:
+                    mism = next((i for i in range(min(len(readback), len(chunk)))
+                                 if readback[i] != chunk[i]), 0)
+                    got = readback[mism] if mism < len(readback) else -1
+                    exp = chunk[mism] if mism < len(chunk) else -1
+                    self.gba_flash_reset()
+                    return False, (f"Sector {idx} at 0x{sec_addr:X} verify "
+                                   f"FAILED at byte {mism}: got 0x{got:02X}, "
+                                   f"expected 0x{exp:02X}. Write stopped.")
+
+                written += sec_size
+                if progress:
+                    progress(min(written, len(data)), len(data))
+        finally:
+            self.gba_flash_reset()
+
+        _log("Fast write complete. All sectors erased, block-written and "
+             "verified.")
+        return True, (f"Wrote and verified {len(data)} bytes using fast block "
+                      f"writes. The ROM is on the cart and reads back matching "
+                      f"the file.")
+
     def gba_flash_write_rom(self, data: bytes, erase_regions,
                             unlock_a1: int = 0xAAA, unlock_a2: int = 0x555,
                             write_settle_s: float = 0.0002,

@@ -1282,6 +1282,11 @@ class DeviceWindow(QMainWindow):
                 return
 
             a1, a2 = self._unlock_addrs_for(result.variant)
+            # If the chip's CFI says buffered/single write and it is not swapped,
+            # try the fast block write; fall back to word-at-a-time if the block
+            # command does not verify on a probe.
+            use_fast = bool(result.cfi and (result.cfi.buffer_write
+                                            or result.cfi.single_write))
 
             def write_job(progress, log, cancel):
                 # 5V is required; the probe left the device at 3.3V.
@@ -1290,9 +1295,34 @@ class DeviceWindow(QMainWindow):
                 import time as _t
                 _t.sleep(0.1)
                 try:
-                    ok2, msg = self.dev.gba_flash_write_rom(
-                        data, regions, unlock_a1=a1, unlock_a2=a2,
-                        progress=progress, log=log, cancel=cancel)
+                    block_cmd = None
+                    if use_fast:
+                        log("Checking whether fast block writing works on this "
+                            "cart\u2026")
+                        okf, _rb, mf = self.dev.gba_flash_block_write_probe(
+                            block_command="f", log=None)
+                        if okf:
+                            block_cmd = "f"
+                        elif "swap" in mf.lower():
+                            okt, _rb2, _mt = self.dev.gba_flash_block_write_probe(
+                                block_command="t", log=None)
+                            if okt:
+                                block_cmd = "t"
+                    if block_cmd:
+                        log(f"Fast block writing works (command "
+                            f"'{block_cmd}'). Using it.")
+                        # The probe erased sector 0; the fast write erases every
+                        # sector itself, so this is fine.
+                        ok2, msg = self.dev.gba_flash_write_rom_fast(
+                            data, regions, block_command=block_cmd,
+                            progress=progress, log=log, cancel=cancel)
+                    else:
+                        if use_fast:
+                            log("Fast block writing did not verify; using the "
+                                "reliable word-at-a-time write instead.")
+                        ok2, msg = self.dev.gba_flash_write_rom(
+                            data, regions, unlock_a1=a1, unlock_a2=a2,
+                            progress=progress, log=log, cancel=cancel)
                 finally:
                     self.dev.set_mode(gx.VOLTAGE_3_3V)
                 if not ok2:
