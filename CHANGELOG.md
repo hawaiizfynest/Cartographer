@@ -1,21 +1,21 @@
 # Changelog
 
-## v1.1.2
+## v1.1.3
 
-- Fast ROM writing. Writing a ROM used to program one word at a time over the
-  cable, which was reliable but slow (hours for a large game). The device
-  firmware also has a block-write command that programs a whole 256-byte block on
-  the cart at once, which is far faster. Write ROM to flash cart now checks
-  whether that command works on the cart (a quick one-block test, including the
-  data-line-swapped case some repro carts need) and, if it does, uses it for the
-  whole write. The safety design is unchanged: every sector is erased, written,
-  then read back and checked against the file, and the write stops at the first
-  mismatch. If the fast command does not verify on a cart, the write falls back
-  to the reliable word-at-a-time path automatically. In practice this turns a
-  multi-hour write into minutes.
+- Fast ROM writing, now with buffered writes for a little more speed. Writing a
+  ROM used to program one word at a time over the cable, which was reliable but
+  slow (hours for a large game). The device firmware has faster commands that
+  program a whole 256-byte block on the cart at once. Write ROM to flash cart now
+  picks the fastest one the cart supports: it tries the buffered write first,
+  then the plain block write (each including the data-line-swapped case some
+  repro carts need), and uses whichever verifies. The safety design is unchanged:
+  every sector is erased, written, then read back and checked against the file,
+  and the write stops at the first mismatch. If no fast command verifies, the
+  write falls back to the reliable word-at-a-time path automatically. In practice
+  this turns a multi-hour write into minutes.
 - The fast-write check is also available on its own as Tools > Test fast block
-  write, which erases sector 0, writes one test block, and reports whether the
-  fast command works, without writing a whole ROM.
+  write, which erases sector 0, writes one test block, and reports which fast
+  command works, without writing a whole ROM.
 
 ## v1.0.15
 

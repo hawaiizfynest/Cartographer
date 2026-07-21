@@ -69,6 +69,12 @@ GBA_FLASH_WRITE_BYTE = "b"
 # (swapped -> 't').
 GBA_FLASH_WRITE_256BYTE = "f"
 GBA_FLASH_WRITE_256BYTE_SWAPPED = "t"
+# Buffered block-write commands: like the block write above, but the firmware
+# uses the chip's hardware write buffer, which can be faster still. 'c' is the
+# plain buffered command; 'd' is the D0/D1-swapped variant. Sent identically to
+# the block commands (command char + 256 bytes + ack).
+GBA_FLASH_WRITE_BUFFERED_256BYTE = "c"
+GBA_FLASH_WRITE_BUFFERED_256BYTE_SWAPPED = "d"
 GBA_FLASH_WRITE_ATMEL = "a"
 GBA_FLASH_4K_SECTOR_ERASE = "s"
 GBA_FLASH_CART_WRITE_BYTE = "n"   # write a command byte to the GBA flash bus

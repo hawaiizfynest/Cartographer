@@ -1296,20 +1296,30 @@ class DeviceWindow(QMainWindow):
                 _t.sleep(0.1)
                 try:
                     block_cmd = None
+                    how = ""
                     if use_fast:
-                        log("Checking whether fast block writing works on this "
+                        log("Checking which fast write mode works on this "
                             "cart\u2026")
-                        okf, _rb, mf = self.dev.gba_flash_block_write_probe(
-                            block_command="f", log=None)
-                        if okf:
-                            block_cmd = "f"
-                        elif "swap" in mf.lower():
-                            okt, _rb2, _mt = self.dev.gba_flash_block_write_probe(
-                                block_command="t", log=None)
-                            if okt:
-                                block_cmd = "t"
+                        # Try fastest first: buffered ('c'), then plain block
+                        # ('f'), each with its D0/D1-swapped variant as a
+                        # fallback. First one that verifies a test block wins.
+                        for cmd, label, swapped in (
+                                ("c", "buffered", "d"),
+                                ("f", "block", "t")):
+                            okp, _rb, mp = self.dev.gba_flash_block_write_probe(
+                                block_command=cmd, log=None)
+                            if okp:
+                                block_cmd, how = cmd, label
+                                break
+                            if "swap" in mp.lower():
+                                oks, _rb2, _ms = \
+                                    self.dev.gba_flash_block_write_probe(
+                                        block_command=swapped, log=None)
+                                if oks:
+                                    block_cmd, how = swapped, label + " (swapped)"
+                                    break
                     if block_cmd:
-                        log(f"Fast block writing works (command "
+                        log(f"Fast {how} writing works (command "
                             f"'{block_cmd}'). Using it.")
                         # The probe erased sector 0; the fast write erases every
                         # sector itself, so this is fine.
@@ -1377,25 +1387,27 @@ class DeviceWindow(QMainWindow):
             import time as _t
             _t.sleep(0.1)
             try:
-                # Try the plain 'f' command first (non-swapped carts).
-                ok_f, _rb, m = self.dev.gba_flash_block_write_probe(
-                    block_command="f", log=log)
-                if ok_f:
-                    log("RESULT: the fast block-write command 'f' works on this "
-                        "cart. A fast write mode can use it.")
-                    return
-                # If 'f' failed as swapped, try 't'.
-                if "swap" in m.lower():
-                    log("Plain command came back swapped; trying the swapped "
-                        "command 't'\u2026")
-                    ok_t, _rb2, _m2 = self.dev.gba_flash_block_write_probe(
-                        block_command="t", log=log)
-                    if ok_t:
-                        log("RESULT: the swapped block-write command 't' works "
-                            "on this cart.")
+                # Try fastest first: buffered ('c'), then plain block ('f'),
+                # each with its swapped variant.
+                for cmd, label, swapped in (("c", "buffered", "d"),
+                                            ("f", "block", "t")):
+                    okp, _rb, mp = self.dev.gba_flash_block_write_probe(
+                        block_command=cmd, log=log)
+                    if okp:
+                        log(f"RESULT: fast {label} writing (command '{cmd}') "
+                            f"works on this cart. The ROM write will use it.")
                         return
-                log("RESULT: the fast block-write command did not verify on this "
-                    "cart. The reliable word-at-a-time write is unaffected.")
+                    if "swap" in mp.lower():
+                        log(f"Plain {label} command came back swapped; trying "
+                            f"the swapped variant '{swapped}'\u2026")
+                        oks, _rb2, _ms = self.dev.gba_flash_block_write_probe(
+                            block_command=swapped, log=log)
+                        if oks:
+                            log(f"RESULT: fast {label} writing (swapped command "
+                                f"'{swapped}') works on this cart.")
+                            return
+                log("RESULT: no fast write command verified on this cart. The "
+                    "reliable word-at-a-time write is unaffected.")
             finally:
                 self.dev.set_mode(gx.VOLTAGE_3_3V)
 

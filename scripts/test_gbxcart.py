@@ -93,7 +93,8 @@ class FakeSerial:
 
     # Write commands carry a fixed-size payload after the command byte.
     _WRITE_CMDS = {ord("W"): 64, ord("w"): 64, ord("p"): 8, ord("b"): 64,
-                   ord("a"): 128, ord("f"): 256, ord("t"): 256}
+                   ord("a"): 128, ord("f"): 256, ord("t"): 256,
+                   ord("c"): 256, ord("d"): 256}
 
     def _maybe_process(self):
         if not self._wr:
@@ -135,27 +136,30 @@ class FakeSerial:
             base = self._save_bank * 0x10000 + self._addr
             self._write_into("flash", base, payload)
             self._addr += len(payload)
-        elif cmd in ("f", "t"):             # GBA ROM block write (256 bytes)
+        elif cmd in ("f", "t", "c", "d"):   # GBA ROM block/buffered write (256 B)
             # Firmware block write: program 256 bytes into ROM flash starting at
             # the current (halved) address, then auto-advance. Honour 5V and the
             # erase requirement (can only program erased-to-0xFF flash).
+            # 'f'/'c' are non-swapped; 't'/'d' are D0/D1-swapped.
             self._block_write_rom(cmd, self._addr * 2, payload)
             self._addr += len(payload) // 2   # address is in 16-bit words
         self._out += b"1"                   # ack
 
     def _block_write_rom(self, cmd, byte_addr, payload):
-        # Model the firmware block program. This chip is NON-swapped, so only the
-        # 'f' command programs correctly; the 't' (swapped) command would land
-        # D0/D1-swapped data, which the probe should detect as wrong.
+        # Model the firmware block program. This chip is NON-swapped, so the
+        # non-swapped commands ('f' block, 'c' buffered) program correctly, while
+        # the swapped commands ('t', 'd') would land D0/D1-swapped data, which the
+        # probe should detect as wrong.
         if self.requires_5v and self._voltage != 5:
             return
         if self._programmed_words is None:
             self._programmed_words = {}
+        swapped_cmd = cmd in ("t", "d")
         for i in range(0, len(payload) - 1, 2):
             a = byte_addr + i
             lo, hi = payload[i], payload[i + 1]
             word = lo | (hi << 8)
-            if cmd == "t":
+            if swapped_cmd:
                 # Swapped command on a non-swapped chip: D0/D1 of each byte swap.
                 def swap01(v):
                     return (v & ~0b11) | ((v >> 1) & 1) | ((v & 1) << 1)
@@ -893,6 +897,62 @@ def test_write_rom_fast_stops_on_bad_erase():
     ok, msg = dev.gba_flash_write_rom_fast(new_rom, ((0x1000, 4),))
     assert ok is False
     assert "erase" in msg.lower()
+
+
+def test_buffered_write_probe_c_command_works():
+    # v1.1.2: the buffered 'c' command should also program this non-swapped chip
+    # correctly (the probe is command-agnostic).
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x4000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000
+    dev = _connect(fake)
+    dev.flash_settle_s = 0
+    dev.flash_poll_s = 0
+    dev.select_gba()
+    dev.set_mode(gx.VOLTAGE_5V)
+    ok, _rb, msg = dev.gba_flash_block_write_probe(block_command="c")
+    assert ok is True, f"'c' buffered write should verify: {msg}"
+
+
+def test_buffered_write_probe_d_detected_swapped():
+    # The swapped buffered command 'd' on a non-swapped chip must be caught.
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x4000))
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000
+    dev = _connect(fake)
+    dev.flash_settle_s = 0
+    dev.flash_poll_s = 0
+    dev.select_gba()
+    dev.set_mode(gx.VOLTAGE_5V)
+    ok, _rb, msg = dev.gba_flash_block_write_probe(block_command="d")
+    assert ok is False, "'d' on a non-swapped chip must fail"
+    assert "swap" in msg.lower()
+
+
+def test_write_rom_fast_with_buffered_command():
+    # v1.1.2: the fast write loop must also work with the buffered command 'c',
+    # erasing, buffered-writing, and verifying a multi-sector ROM byte-for-byte.
+    orig = bytes((i * 7 + 1) & 0xFF for i in range(0x4000))
+    new_rom = bytes((i * 3 + 9) & 0xFF for i in range(0x2800))   # 10 KB
+    fid = bytes([0x01, 0x00, 0x7E, 0x22, 0x00, 0x00, 0x18, 0x00])
+    fake = FakeSerial(rom=orig, mode=gx.GBA_MODE, flash_id=fid,
+                      flash_variant="none", requires_5v=True, cfi_variant="AAA")
+    fake._rom_sector_size = 0x1000
+    dev = _connect(fake)
+    dev.flash_settle_s = 0
+    dev.flash_poll_s = 0
+    dev.select_gba()
+    dev.set_mode(gx.VOLTAGE_5V)
+    ok, msg = dev.gba_flash_write_rom_fast(new_rom, ((0x1000, 4),),
+                                           block_command="c")
+    assert ok is True, f"buffered fast write should succeed: {msg}"
+    dev.set_mode(gx.VOLTAGE_5V)
+    readback = dev._gba_read_bytes_at(0x0, len(new_rom))
+    assert readback == new_rom
 
 
 def test_block_write_probe_f_command_works():
