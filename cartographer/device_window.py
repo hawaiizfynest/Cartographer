@@ -39,6 +39,11 @@ class DeviceWindow(QMainWindow):
         self.gba_header: bytes = b""
         self.gb_parsed = None
         self.save_id: str = ""
+        # When set, this overrides the detected save type for backup and
+        # restore. Needed for ROMs that have been save-type patched: patching
+        # does not change the game code, so the database still reports the
+        # original type while the ROM now saves somewhere else entirely.
+        self.save_override: str = ""
         self.resolved_title: str = ""
         self.game_code: str = ""
 
@@ -106,6 +111,8 @@ class DeviceWindow(QMainWindow):
         act_rom_tools.triggered.connect(self.on_rom_tools)
         act_save_editor = tools_menu.addAction("Save editor (view and edit)\u2026")
         act_save_editor.triggered.connect(self.on_save_editor)
+        act_save_override = tools_menu.addAction("Override save type\u2026")
+        act_save_override.triggered.connect(self.on_override_save_type)
         act_library = tools_menu.addAction("Library\u2026")
         act_library.triggered.connect(self.on_library)
         act_reverify = tools_menu.addAction(
@@ -705,6 +712,77 @@ class DeviceWindow(QMainWindow):
     def _is_gba(self) -> bool:
         return self.info is not None and self.info.cart_mode == gx.GBA_MODE
 
+    def _effective_save_id(self) -> str:
+        """The save type backup and restore should actually use.
+
+        Normally the detected type, but an override wins when one is set. The
+        detected type comes from a database keyed on the game code, and a ROM
+        that has been save-type patched keeps its original game code, so the
+        database keeps reporting the type the game used before patching.
+        """
+        return self.save_override or self.save_id
+
+    def _save_kind(self) -> str:
+        """The effective save type as a SAVE_LAYOUT key."""
+        sid = self._effective_save_id()
+        return sid if sid in gx.SAVE_LAYOUT else gx.save_kind_from_id(sid)
+
+    def _refresh_save_label(self) -> None:
+        """Show the effective save type, marking it when it is an override."""
+        sid = self._effective_save_id()
+        if not sid:
+            self.lbl_save.setText("\u2014")
+            return
+        kind = self._save_kind()
+        total = gx.SAVE_LAYOUT.get(kind, (0,))[0]
+        unit = (f"{total // 1024} KB" if total >= 1024
+                else f"{total} bytes") if total else "?"
+        suffix = "  (override)" if self.save_override else ""
+        self.lbl_save.setText(f"{sid} ({unit}){suffix}")
+
+    def on_override_save_type(self) -> None:
+        """Let the person set the save type by hand when detection is wrong."""
+        if not self._is_gba():
+            QMessageBox.information(
+                self, __app_name__,
+                "Save type override applies to GBA carts. Connect a GBA cart "
+                "first.")
+            return
+        kinds = sorted(gx.SAVE_LAYOUT.keys())
+        labels = []
+        for k in kinds:
+            total = gx.SAVE_LAYOUT[k][0]
+            unit = f"{total // 1024} KB" if total >= 1024 else f"{total} bytes"
+            labels.append(f"{k}  ({unit})")
+        labels.insert(0, "Use the detected type (no override)")
+
+        current = 0
+        if self.save_override in kinds:
+            current = kinds.index(self.save_override) + 1
+
+        detected = self.save_id or "nothing detected"
+        choice, ok = QInputDialog.getItem(
+            self, __app_name__,
+            f"Detected save type: {detected}\n\n"
+            f"Pick the save type to use for backup and restore. Set this when "
+            f"the detected type is wrong, which happens with ROMs that have "
+            f"been save-type patched: patching leaves the game code alone, so "
+            f"the detected type is still the one the game used before "
+            f"patching.\n",
+            labels, current, False)
+        if not ok:
+            return
+        if choice == labels[0]:
+            self.save_override = ""
+            self.log("Save type override cleared; using the detected type "
+                     f"({detected}).")
+        else:
+            self.save_override = choice.split()[0]
+            self.log(f"Save type override set to {self.save_override}. Backup "
+                     f"and restore will use it instead of the detected type "
+                     f"({detected}).")
+        self._refresh_save_label()
+
     def _default_filename(self, extension: str) -> str:
         """Build a friendly, filesystem-safe default name from the resolved
         game title, falling back to the game code, then a generic name."""
@@ -813,15 +891,21 @@ class DeviceWindow(QMainWindow):
         self.log(f"GBA cart: {info.full_title}"
                  + ("" if info.is_exact else "  (from game code; dump ROM for an "
                     "exact match)"))
-        # Save type: prefer the database (authoritative), fall back to a ROM
-        # byte-scan only if the code is unknown.
+        # Save type: prefer the database, fall back to a ROM byte-scan only if
+        # the code is unknown. The database is keyed on the game code, which a
+        # save-type patch does not change, so a patched ROM still reports the
+        # type it used before patching. Tools > Override save type is the way
+        # round that.
         db_save = titles.save_type_for_code(code)
         if db_save and db_save in gx.SAVE_LAYOUT:
             self.save_id = db_save
             total = gx.SAVE_LAYOUT[db_save][0]
             unit = f"{total // 1024} KB" if total >= 1024 else f"{total} bytes"
-            self.lbl_save.setText(f"{db_save} ({unit})")
+            self._refresh_save_label()
             self.log(f"Save type (from database): {db_save} ({unit}).")
+            if self.save_override:
+                self.log(f"An override is active, so {self.save_override} will "
+                         f"be used for backup and restore.")
         else:
             self.lbl_save.setText("scanning\u2026")
             self._detect_save_async()
@@ -1006,8 +1090,7 @@ class DeviceWindow(QMainWindow):
         if not path:
             return
         if self._is_gba():
-            kind = self.save_id if self.save_id in gx.SAVE_LAYOUT else \
-                gx.save_kind_from_id(self.save_id)
+            kind = self._save_kind()
             if kind not in gx.SAVE_LAYOUT:
                 if QMessageBox.question(
                         self, __app_name__,
@@ -1022,7 +1105,8 @@ class DeviceWindow(QMainWindow):
                 self._start(job, f"Save saved to {path}")
                 return
             total = gx.SAVE_LAYOUT[kind][0]
-            self.log(f"Dumping {self.save_id} save ({total // 1024 or total} "
+            self.log(f"Dumping {self._effective_save_id()} save "
+                     f"({total // 1024 or total} "
                      f"{'KB' if total >= 1024 else 'bytes'})\u2026")
 
             def job(progress, log, cancel):
@@ -1075,8 +1159,7 @@ class DeviceWindow(QMainWindow):
 
     def _restore_gba(self, path, data) -> None:
         import os as _os
-        kind = self.save_id if self.save_id in gx.SAVE_LAYOUT else \
-            gx.save_kind_from_id(self.save_id)
+        kind = self._save_kind()
         if kind not in gx.SAVE_LAYOUT:
             QMessageBox.warning(
                 self, __app_name__,
@@ -1085,11 +1168,15 @@ class DeviceWindow(QMainWindow):
             return
         expected = gx.SAVE_LAYOUT[kind][0]
         if len(data) != expected:
+            hint = ("" if self.save_override else
+                    "\n\nIf this ROM has been save-type patched, the detected "
+                    "type is the one it used before patching. Set the right "
+                    "one with Tools > Override save type.")
             if QMessageBox.question(
                     self, "Size mismatch",
                     f"The save file is {len(data)} bytes but this cart's "
                     f"{kind} save is {expected} bytes. Writing a mismatched save "
-                    f"can corrupt it.\n\nContinue anyway?"
+                    f"can corrupt it.{hint}\n\nContinue anyway?"
                     ) != QMessageBox.StandardButton.Yes:
                 return
         if QMessageBox.warning(
