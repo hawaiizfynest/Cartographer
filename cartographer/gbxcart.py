@@ -174,6 +174,18 @@ def _never() -> bool:  # pragma: no cover
     return False
 
 
+def format_duration(seconds: float) -> str:
+    """Human-friendly elapsed time, e.g. '4 min 48 sec' or '9 sec'."""
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds} sec"
+    mins, secs = divmod(seconds, 60)
+    if mins < 60:
+        return f"{mins} min {secs} sec" if secs else f"{mins} min"
+    hrs, mins = divmod(mins, 60)
+    return f"{hrs} hr {mins} min"
+
+
 @dataclass
 class PortInfo:
     device: str
@@ -712,9 +724,12 @@ class GBxCart:
             return False, (f"ROM is {len(data)} bytes but the chip holds "
                            f"{total_size}. Refusing to write past the end.")
 
+        kind = "buffered" if block_command in ("c", "d") else "block"
         _log(f"Writing {len(data)} bytes across up to {len(sectors)} sectors "
-             f"using fast block writes ({block_size}-byte blocks).")
+             f"using fast {kind} writes ({block_size}-byte blocks).")
 
+        import time as _time
+        _start = _time.time()
         written = 0
         try:
             for idx, (sec_addr, sec_size) in enumerate(sectors):
@@ -780,11 +795,12 @@ class GBxCart:
         finally:
             self.gba_flash_reset()
 
-        _log("Fast write complete. All sectors erased, block-written and "
-             "verified.")
-        return True, (f"Wrote and verified {len(data)} bytes using fast block "
-                      f"writes. The ROM is on the cart and reads back matching "
-                      f"the file.")
+        elapsed = format_duration(_time.time() - _start)
+        _log(f"Fast write complete in {elapsed}. All sectors erased, "
+             f"{kind}-written and verified.")
+        return True, (f"Wrote and verified {len(data)} bytes using fast {kind} "
+                      f"writes in {elapsed}. The ROM is on the cart and reads "
+                      f"back matching the file.")
 
     def gba_flash_write_rom(self, data: bytes, erase_regions,
                             unlock_a1: int = 0xAAA, unlock_a2: int = 0x555,
@@ -852,6 +868,8 @@ class GBxCart:
 
     def _write_rom_inner(self, data, sectors, unlock_a1, unlock_a2,
                          progress, _log, _cancelled) -> tuple:
+        import time as _time
+        _start = _time.time()
         written = 0
         for idx, (sec_addr, sec_size) in enumerate(sectors):
             if sec_addr >= len(data):
@@ -932,9 +950,11 @@ class GBxCart:
                 progress(min(written, len(data)), len(data))
 
         self.gba_flash_reset()
-        _log("Write complete. All sectors erased, programmed and verified.")
-        return True, (f"Wrote and verified {len(data)} bytes. The ROM is on the "
-                      f"cart and reads back matching the file.")
+        elapsed = format_duration(_time.time() - _start)
+        _log(f"Write complete in {elapsed}. All sectors erased, programmed and "
+             f"verified.")
+        return True, (f"Wrote and verified {len(data)} bytes in {elapsed}. The "
+                      f"ROM is on the cart and reads back matching the file.")
 
     # Flash-ID unlock sequences. Each is (name, (a1,d1), (a2,d2), (a3,d3), reset)
     # where the three writes enter read-ID mode and reset returns to read mode.

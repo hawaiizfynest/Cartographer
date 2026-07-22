@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.4
+
+- Writing a ROM now reports how long it took, both in the log and in the
+  completion message.
+- Added a save file comparison tool under Tools > Compare saves. Pick two save
+  files and it reports whether they match, how many bytes differ and where, and
+  what that most likely means. Pick one and it tells you whether the file holds
+  real data or is blank. This answers the question a save file's name and size
+  cannot: whether a cart actually kept what was written to it. Back the save up,
+  power the cart down and back up, back it up again, and compare the two.
+- The write log now names the write mode it is actually using (buffered or
+  block) instead of always saying "block". Cosmetic only; the correct command
+  was always being used.
+
 ## v1.1.3
 
 - Fast ROM writing, now with buffered writes for a little more speed. Writing a
