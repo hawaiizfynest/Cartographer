@@ -164,6 +164,95 @@ def compare_saves(a: bytes, b: bytes, max_regions: int = 64) -> SaveDiff:
     return diff
 
 
+def find_ascii_strings(data: bytes, min_len: int = 4) -> list:
+    """Find runs of printable ASCII in a save, as (offset, text).
+
+    Save files are game-specific binary, so nothing here knows what any byte
+    means. Readable text is still the most useful landmark there is: player
+    names, file labels, game identifiers and menu strings usually sit in plain
+    ASCII, and they tell you which parts of the file belong to what.
+    """
+    out = []
+    start = -1
+    run = []
+    for i, b in enumerate(data):
+        if 32 <= b < 127:
+            if start < 0:
+                start = i
+            run.append(chr(b))
+        else:
+            if start >= 0 and len(run) >= min_len:
+                out.append((start, "".join(run)))
+            start = -1
+            run = []
+    if start >= 0 and len(run) >= min_len:
+        out.append((start, "".join(run)))
+    return out
+
+
+def region_map(data: bytes, block: int = 512) -> list:
+    """Split a save into blocks and label each as blank or holding data.
+
+    Returns a list of (offset, length, kind, fill) where kind is "blank" or
+    "data". Consecutive blocks of the same kind are merged, so the result reads
+    as a handful of regions rather than hundreds of blocks. This shows the shape
+    of a save: where the used areas are and where the untouched space sits.
+    """
+    if not data:
+        return []
+    regions = []
+    for off in range(0, len(data), block):
+        chunk = data[off:off + block]
+        first = chunk[0]
+        blank = all(b == first for b in chunk) and first in BLANK_FILLS
+        kind = "blank" if blank else "data"
+        fill = first if blank else -1
+        if regions and regions[-1][2] == kind and regions[-1][3] == fill:
+            o, ln, k, f = regions[-1]
+            regions[-1] = (o, ln + len(chunk), k, f)
+        else:
+            regions.append((off, len(chunk), kind, fill))
+    return [tuple(r) for r in regions]
+
+
+def structure_report(data: bytes, max_strings: int = 40) -> str:
+    """A readable summary of what a save file contains structurally."""
+    if not data:
+        return "Empty file."
+    lines = [inspect_save(data).summary(), ""]
+
+    regions = region_map(data)
+    lines.append(f"Layout ({len(regions)} regions):")
+    for off, length, kind, fill in regions[:24]:
+        if kind == "blank":
+            lines.append(f"  0x{off:06X}  {length:>6} bytes  blank "
+                         f"(0x{fill:02X})")
+        else:
+            lines.append(f"  0x{off:06X}  {length:>6} bytes  data")
+    if len(regions) > 24:
+        lines.append(f"  \u2026and {len(regions) - 24} more")
+
+    strings = find_ascii_strings(data)
+    lines.append("")
+    if strings:
+        lines.append(f"Readable text found ({len(strings)} runs, showing up to "
+                     f"{max_strings}):")
+        for off, text in strings[:max_strings]:
+            shown = text if len(text) <= 60 else text[:57] + "..."
+            lines.append(f"  0x{off:06X}  {shown}")
+        if len(strings) > max_strings:
+            lines.append(f"  \u2026and {len(strings) - max_strings} more")
+    else:
+        lines.append("No readable text found. The save is entirely binary, "
+                     "which is normal for many games.")
+
+    lines.append("")
+    lines.append("What the bytes mean is specific to each game. Nothing here "
+                 "can label them for you; the layout and any readable text are "
+                 "landmarks for finding your way around.")
+    return "\n".join(lines)
+
+
 def hex_preview(data: bytes, offset: int, length: int = 32) -> str:
     """A short hex dump around an offset, for eyeballing what changed."""
     if not data or offset < 0:

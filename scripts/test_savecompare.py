@@ -114,6 +114,55 @@ def test_diff_regions_are_capped():
     assert len(d.diff_regions) <= 8
 
 
+def test_find_ascii_strings_locates_text():
+    data = bytearray(b"\xFF" * 512)
+    data[0x40:0x48] = b"PLAYER01"
+    data[0x100:0x104] = b"ABCD"
+    found = sc.find_ascii_strings(bytes(data), min_len=4)
+    offsets = {off: text for off, text in found}
+    assert 0x40 in offsets and offsets[0x40] == "PLAYER01"
+    assert 0x100 in offsets and offsets[0x100] == "ABCD"
+
+
+def test_find_ascii_strings_respects_min_length():
+    data = b"\xFF\xFF" + b"AB" + b"\xFF\xFF" + b"LONGER" + b"\xFF"
+    found = sc.find_ascii_strings(data, min_len=4)
+    texts = [t for _o, t in found]
+    assert "LONGER" in texts
+    assert "AB" not in texts
+
+
+def test_region_map_splits_data_and_blank():
+    data = bytearray(b"\xFF" * 2048)
+    data[0:512] = bytes((i * 3 + 1) & 0xFF for i in range(512))
+    regions = sc.region_map(bytes(data), block=512)
+    assert regions[0][2] == "data"
+    assert regions[0][0] == 0
+    # The remaining blocks are blank and should be merged into one region.
+    assert regions[1][2] == "blank"
+    assert regions[1][1] == 1536
+
+
+def test_region_map_all_blank_is_one_region():
+    regions = sc.region_map(b"\x00" * 4096, block=512)
+    assert len(regions) == 1
+    assert regions[0][2] == "blank"
+    assert regions[0][3] == 0x00
+
+
+def test_structure_report_mentions_layout_and_text():
+    data = bytearray(b"\xFF" * 4096)
+    data[0:8] = b"SAVEDATA"
+    report = sc.structure_report(bytes(data))
+    assert "Layout" in report
+    assert "SAVEDATA" in report
+    assert "specific to each game" in report
+
+
+def test_structure_report_handles_empty():
+    assert "Empty file" in sc.structure_report(b"")
+
+
 def test_hex_preview_shows_offset_row():
     data = _data(256)
     out = sc.hex_preview(data, 0x40, 32)

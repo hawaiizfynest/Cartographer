@@ -104,6 +104,8 @@ class DeviceWindow(QMainWindow):
         act_rom_tools = tools_menu.addAction(
             "ROM and save tools (patches, cheats, compare saves)\u2026")
         act_rom_tools.triggered.connect(self.on_rom_tools)
+        act_save_editor = tools_menu.addAction("Save editor (view and edit)\u2026")
+        act_save_editor.triggered.connect(self.on_save_editor)
         act_library = tools_menu.addAction("Library\u2026")
         act_library.triggered.connect(self.on_library)
         act_reverify = tools_menu.addAction(
@@ -137,6 +139,10 @@ class DeviceWindow(QMainWindow):
     def on_rom_tools(self) -> None:
         from .tools_window import ToolsDialog
         ToolsDialog(self).exec()
+
+    def on_save_editor(self) -> None:
+        from .save_editor import SaveEditorDialog
+        SaveEditorDialog(parent=self).exec()
 
     def on_library(self) -> None:
         from .library_window import LibraryDialog
