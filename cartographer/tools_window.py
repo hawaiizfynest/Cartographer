@@ -55,15 +55,30 @@ class ToolsDialog(QDialog):
         r2 = QHBoxLayout(); r2.addWidget(self.ed_save_b); r2.addWidget(b_b)
         v.addLayout(r2)
 
+        btn_row = QHBoxLayout()
         cmp_btn = QPushButton("Compare")
         cmp_btn.setObjectName("primary")
         cmp_btn.clicked.connect(self._do_compare)
-        v.addWidget(cmp_btn)
+        btn_row.addWidget(cmp_btn, 1)
+        edit_btn = QPushButton("Open first file in save editor\u2026")
+        edit_btn.clicked.connect(self._open_in_editor)
+        btn_row.addWidget(edit_btn)
+        v.addLayout(btn_row)
 
         self.compare_log = QPlainTextEdit()
         self.compare_log.setReadOnly(True)
         v.addWidget(self.compare_log, 1)
         return w
+
+    def _open_in_editor(self) -> None:
+        path = self.ed_save_a.text().strip()
+        if not path:
+            QMessageBox.information(
+                self, __app_name__,
+                "Choose a save file in the first box, then open it here.")
+            return
+        from .save_editor import SaveEditorDialog
+        SaveEditorDialog(path, parent=self).exec()
 
     def _do_compare(self) -> None:
         from . import savecompare as sc

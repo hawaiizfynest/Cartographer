@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.6
+
+- Added a save editor. Open it from Tools > Save editor, or from the Compare
+  saves tab. It shows the whole save file as hex with an ASCII column, lets you
+  change any byte by typing two hex digits, and writes the result to a new file
+  so the original is left alone. There is a go-to-offset box and a find box that
+  takes either text or hex bytes.
+- Alongside the hex view, the editor shows what is in the save: which regions
+  hold data and which are blank, and any readable text with its offset. Save
+  files are game-specific binary, so nothing can label the bytes for you, but
+  the layout and the text runs are the landmarks worth having when you are
+  finding your way around one.
+
 ## v1.1.5
 
 - Writing a ROM now reports how long it took, both in the log and in the
