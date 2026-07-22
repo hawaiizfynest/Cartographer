@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.9
+
+- Added Tools > Identify save chip. A flash save lives on its own small chip,
+  separate from the large ROM chip, and games read that chip's id before writing
+  a save so they know which command sequence it needs. A chip whose id a game
+  does not recognise is one the game will not write to, which looks like a save
+  that will not stick or reads as corrupt even though a flasher can read and
+  write the same chip without trouble. This reads the id and says whether it is
+  one games know. Read-only.
+
 ## v1.1.8
 
 - Added a save type override under Tools > Override save type. Backup and

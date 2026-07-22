@@ -118,6 +118,54 @@ SUPPORTED_CHIPS = [
 KNOWN_BAD_MARKINGS = ("6600", "4050M")
 
 
+# The small flash chips used for GBA saves, keyed on the 16-bit id a read-ID
+# command returns (device byte first, then manufacturer byte, as the chip
+# presents it). Games check this id before writing a save and drive the chip
+# with the command sequence that chip expects, so a chip whose id a game does
+# not recognise is one the game will refuse to write to. Capacity is in bytes.
+SAVE_FLASH_IDS = {
+    0x1B32: ("Panasonic MN63F805MNP", 65536),
+    0x3D1F: ("Atmel AT29LV512", 65536),
+    0xD4BF: ("SST 39VF512", 65536),
+    0x1CC2: ("Macronix MX29L512", 65536),
+    0x09C2: ("Macronix MX29L010", 131072),
+    0x1362: ("Sanyo LE26FV10N1TS", 131072),
+}
+
+
+def lookup_save_flash(chip_id: int):
+    """Return (name, capacity_bytes) for a save flash id, or None."""
+    return SAVE_FLASH_IDS.get(chip_id)
+
+
+def interpret_save_flash_id(data: bytes) -> str:
+    """Describe what a save-flash read-ID response means.
+
+    Games identify the save chip before writing to it. A recognised id means a
+    game knows how to drive the chip; an unrecognised one means it very likely
+    will not, which shows up in-game as a save that will not write or reads as
+    corrupt, even though a flasher can read and write the same chip fine.
+    """
+    if not data:
+        return ("The device did not return a save flash id. This firmware may "
+                "not implement the read-ID command.")
+    hexed = " ".join(f"{b:02X}" for b in data[:8])
+    if all(b == 0x00 for b in data[:2]) or all(b == 0xFF for b in data[:2]):
+        return (f"Save flash id read back as {hexed}, which is not a real chip "
+                f"id. Either there is no flash save chip responding, or it does "
+                f"not answer the read-ID command.")
+    chip_id = data[0] | (data[1] << 8)
+    known = lookup_save_flash(chip_id)
+    if known:
+        name, cap = known
+        return (f"Save flash chip: {name} (id 0x{chip_id:04X}, "
+                f"{cap // 1024} KB). This is a chip games know how to write.")
+    return (f"Save flash id 0x{chip_id:04X} (raw {hexed}) is not one of the "
+            f"chips games recognise. A flasher can still read and write it, but "
+            f"a game that checks the id before saving will refuse to write, "
+            f"which looks like a save that will not stick or reads as corrupt.")
+
+
 @dataclass
 class FlashIdResult:
     is_flashable: bool

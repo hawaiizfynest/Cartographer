@@ -113,6 +113,8 @@ class DeviceWindow(QMainWindow):
         act_save_editor.triggered.connect(self.on_save_editor)
         act_save_override = tools_menu.addAction("Override save type\u2026")
         act_save_override.triggered.connect(self.on_override_save_type)
+        act_save_chip = tools_menu.addAction("Identify save chip")
+        act_save_chip.triggered.connect(self.on_identify_save_chip)
         act_library = tools_menu.addAction("Library\u2026")
         act_library.triggered.connect(self.on_library)
         act_reverify = tools_menu.addAction(
@@ -782,6 +784,24 @@ class DeviceWindow(QMainWindow):
                      f"and restore will use it instead of the detected type "
                      f"({detected}).")
         self._refresh_save_label()
+
+    def on_identify_save_chip(self) -> None:
+        """Read the save flash chip's id and say whether games will know it."""
+        if not self._is_gba():
+            QMessageBox.information(
+                self, __app_name__,
+                "Identifying the save chip applies to GBA carts. Set the switch "
+                "to GBA with the cart inserted.")
+            return
+        self.log("Reading the save flash chip id (read-only)\u2026")
+
+        def job(progress, log, cancel):
+            data = self.dev.gba_save_flash_id()
+            if data:
+                log("  raw: " + " ".join(f"{b:02X}" for b in data[:8]))
+            log(flash_db.interpret_save_flash_id(data))
+
+        self._start(job, "Save chip check complete.")
 
     def _default_filename(self, extension: str) -> str:
         """Build a friendly, filesystem-safe default name from the resolved

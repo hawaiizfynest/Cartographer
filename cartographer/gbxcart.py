@@ -493,6 +493,32 @@ class GBxCart:
         self._read_stream(buf, count, _noop, _never)
         return buf.getvalue()[:count]
 
+    def gba_save_flash_id(self) -> bytes:
+        """Read the ID of the cart's SAVE flash chip (not the ROM flash chip).
+
+        A GBA flash save lives on its own small flash chip in the save address
+        space, separate from the large ROM flash. Games identify that chip by its
+        manufacturer and device ID before writing, and drive it with the command
+        sequence that chip expects. A chip whose ID a game does not recognise is
+        a chip the game will not write to, which is why a cart can read and write
+        fine from a flasher and still refuse to save in a game.
+
+        Uses the device's dedicated read-ID command, which enters ID mode, reads
+        the ID and leaves ID mode in one operation. Returns the bytes read, or
+        b"" if the device does not implement the command.
+        """
+        import io
+        try:
+            self.select_gba()
+            self.ser.reset_input_buffer()  # type: ignore[union-attr]
+            self.set_mode(GBA_FLASH_READ_ID)
+            time.sleep(0.1)
+            buf = io.BytesIO()
+            self._read_stream(buf, 64, _noop, _never)
+            return buf.getvalue()[:8]
+        except Exception:  # noqa: BLE001 - a clone may not implement 'i'
+            return b""
+
     def gba_flash_erase_sector(self, sector_addr: int, unlock_a1: int = 0xAAA,
                                unlock_a2: int = 0x555,
                                verify_len: int = 0x80,

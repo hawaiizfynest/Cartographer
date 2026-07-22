@@ -1,9 +1,17 @@
 # Cartographer
 
+[![Latest release](https://img.shields.io/github/v/release/HawaiizFynest/Cartographer?style=flat-square&color=06b6d4)](https://github.com/HawaiizFynest/Cartographer/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/HawaiizFynest/Cartographer/build.yml?style=flat-square)](https://github.com/HawaiizFynest/Cartographer/actions)
+[![Downloads](https://img.shields.io/github/downloads/HawaiizFynest/Cartographer/total?style=flat-square&color=06b6d4)](https://github.com/HawaiizFynest/Cartographer/releases)
+[![License](https://img.shields.io/badge/license-GPL--2.0-blue?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/HawaiizFynest/Cartographer/releases/latest)
+[![Python](https://img.shields.io/badge/python-3.12%2B-3776ab?style=flat-square)](https://www.python.org/)
+
 A desktop app for backing up, restoring and flashing Game Boy, Game Boy Color and
 Game Boy Advance cartridges. It talks to a GBxCart RW (or a compatible clone like
 the "Cyclone" board) over USB and gives you a point-and-click way to pull ROMs and
-saves off a cart, put saves back, and check that a dump came out clean.
+saves off a cart, put saves back, write a ROM to a flash cart, and check that
+everything came out clean.
 
 The software that ships with a lot of these flashers is a dead end, and there was
 no single tool that also did batteryless save patching without dropping down to
@@ -17,6 +25,8 @@ and run it. No install, no Python needed.
 
 ## What it does
 
+### Reading
+
 - Dumps GB, GBC and GBA ROMs, with the ROM size detected automatically on GBA.
 - Backs up and restores saves for every save type: SRAM, EEPROM (4Kbit and
   64Kbit), Flash (512Kbit and 1Mbit with bank switching), and GB/GBC battery RAM.
@@ -29,25 +39,72 @@ and run it. No install, no Python needed.
   still looks fine.
 - Writes a receipt next to each dump and restore. Dumps get a report with the
   checksums, header checks, save type and verdict; restores record the file's
-  hashes and whether the read-back off the cart matched. A bare .sha1 file
-  sits alongside for standard tools. Tools > Re-verify a ROM or save against
-  its receipt rechecks the hashes later, so bit rot or a damaged copy shows up
-  before you need the file. Turn it off in Settings if you'd rather not have
-  the extra files.
+  hashes and whether the read-back off the cart matched. A bare .sha1 file sits
+  alongside for standard tools. Tools > Re-verify a ROM or save against its
+  receipt rechecks the hashes later, so bit rot or a damaged copy shows up before
+  you need the file. Turn it off in Settings if you'd rather not have the extra
+  files.
 - Restores saves back to a cart and reads them straight back to confirm the write
   landed. This is what makes a battery swap safe: back up the save, change the
   dead battery, restore, done.
 - Names your dumps for you. The GBA header only stores a short 12-character
   title, so Cartographer looks up the full game name from the cart's game code,
   and upgrades to the exact release name from the SHA-1 once the whole ROM is
-  dumped. A dump of Dora lands as `Dora the Explorer The Search for Pirate Pig's
-  Treasure (USA).gba` instead of `cartridge.gba`.
+  dumped.
+- Dumps a whole stack of carts in one sitting. Batch dump reads each cart's ROM
+  and save, verifies it, names the file, and prompts you to swap in the next one.
+- Keeps a library view of your dumps: what's verified good, and which files are
+  duplicates of each other by hash.
+
+### Writing to flash carts
+
+- Writes a .gba ROM to a GBA flash cart, with every sector erased, written, then
+  read back and checked against the file. The write stops at the first mismatch
+  and says exactly where, so a bad write can't be reported as a good one.
+- Picks the fastest write method the cart supports. It tests the firmware's
+  buffered and block write commands on a single block first, including the
+  data-line-swapped variants some repro carts need, and uses whichever verifies.
+  If none of them do, it falls back to a slower word-at-a-time write that works
+  anywhere. On a 4 MB game the difference is minutes instead of hours.
+- Reports how long the write took.
+- Identifies the flash chip before writing, and refuses to write without a
+  confirmed chip and a sector map read from the chip itself.
+
+### Flash chip identification
+
 - Identifies the flash chip on a flash cart without writing anything to it, and
-  tells you the chip, its size, and whether it's one the tooling knows how to
-  write. Unknown chips get reported with their raw ID rather than a guess.
-- Tells you which flash cart a game needs. GBA flash carts are locked to one save
-  type because the game checks the save chip's ID, so this saves you from buying
-  the wrong one.
+  reports the chip, its true size, its sector layout, and whether it's one the
+  tooling knows how to write. Unknown chips get reported with their raw ID rather
+  than a guess.
+- Handles the 5V repro carts that stay silent at 3.3V. Some flash carts, including
+  many EpicJoy and Gugxiom style boards, ignore every flash command at 3.3V. The
+  probe raises to 5V for identification and drops back afterwards.
+- Reads the chip's Common Flash Interface data for its real capacity and sector
+  map, rather than guessing from the device ID. Several chips in the S29GL family
+  share one ID across 16, 32 and 64 MB parts, so the ID alone can't tell them
+  apart.
+- Identifies the save flash chip too, which is a separate chip from the ROM flash.
+  Games read that chip's ID before writing a save, so a chip whose ID a game
+  doesn't recognise is one the game won't write to.
+
+### Save tools
+
+- Compares two save files and reports whether they match, how many bytes differ
+  and where, and what that most likely means. Useful for checking whether a cart
+  actually kept a save: back it up, power the cart down and back up, back it up
+  again, and compare.
+- Inspects a single save and tells you whether it holds real data or is blank.
+- Edits a save byte by byte in a hex view with an ASCII column, with go-to-offset
+  and a find box that takes text or hex. Edits are written to a new file, so the
+  original is untouched. Alongside it sits a panel showing which regions hold data
+  and which are blank, plus any readable text with its offset.
+- Lets you override the detected save type. Backup and restore normally use the
+  type looked up from the game code, which is right for an unmodified game and
+  wrong for a patched one: a save-type patch changes where a game saves but leaves
+  the game code alone.
+
+### Patching
+
 - Patches a GBA ROM for batteryless saving, entirely offline, no device needed.
 - Applies ROM hack patches. Point it at a clean base ROM and an IPS, BPS or UPS
   patch and it writes out the hacked ROM. BPS and UPS check the base ROM's
@@ -57,17 +114,15 @@ and run it. No install, no Python needed.
   ROM's existing byte and skipped if it doesn't match, so a wrong code can't
   corrupt the file. GameShark codes get decoded for reference (they're runtime
   RAM writes and can't be baked into a ROM).
-- Dumps a whole stack of carts in one sitting. Batch dump reads each cart's ROM
-  and save, verifies it, names the file, and prompts you to swap in the next one.
-- Keeps a library view of your dumps: what's verified good, and which files are
-  duplicates of each other by hash.
+- Tells you which flash cart a game needs. GBA flash carts are locked to one save
+  type because the game checks the save chip's ID, so this saves you from buying
+  the wrong one.
 
 ## The batteryless patcher
 
-The headline reason this project exists. A lot of cheap flash carts have SRAM but
-no battery, so the save is gone the moment you power off. The batteryless patch
-redirects the game's save into SRAM and flushes it back to the ROM flash on write,
-so it survives without a battery.
+A lot of cheap flash carts have SRAM but no battery, so the save is gone the
+moment you power off. The batteryless patch redirects the game's save into SRAM
+and flushes it back to the ROM flash on write, so it survives without a battery.
 
 That patch isn't original work here. Cartographer bundles a port of
 **metroid-maniac's** `gba-auto-batteryless-patcher`, which does the real work, and
@@ -97,6 +152,17 @@ say.
 Windows may throw a SmartScreen warning the first time, since the build isn't
 code-signed. Click "More info" then "Run anyway."
 
+### Writing a ROM to a flash cart
+
+Writing erases whatever is on the cart, so it asks you to type ERASE to confirm.
+Before that it identifies the chip and reads its sector map, and it won't write
+without both. Once it starts, it tests which fast write command the cart supports
+and uses it, then works sector by sector, checking each one against the file
+before moving on.
+
+A partial write is not damage. If you cancel, or a sector fails to verify, the
+cart holds an incomplete ROM and can be written again.
+
 ### Running from source
 
 If you'd rather run the Python directly (or you're working on the code), you'll
@@ -111,8 +177,8 @@ python run.py
 
 You don't have to. The GitHub Actions workflow builds Windows, macOS and Linux
 binaries on every push, and grabs them from the Actions tab a few minutes later.
-Tag a commit `v1.0.1` (or whatever the next version is) and it publishes a Release
-with all three binaries attached.
+Tag a commit with the next version number and it publishes a Release with all
+three binaries attached.
 
 To build locally anyway:
 
@@ -128,12 +194,7 @@ You'll get a single file in `dist/`.
 Cartographer checks GitHub for a newer release when it starts, and you can check
 any time from Help > Check for updates. When there's a new version it shows you
 the full list of changes first, so you can decide whether it's worth it. From
-there you can update now, be reminded later, or tick the box to skip that version
-for good.
-
-In the built app, choosing Update handles everything: it downloads the new build,
-closes Cartographer, swaps the old program for the new one, and reopens. The
-download gets size-checked against what GitHub reports, and Windows builds are
+a built binary it downloads and swaps itself, and the download is size-checked and
 checked for a valid executable header before anything gets swapped. Running from
 source instead? It'll point you at GitHub Desktop, since that's how you update
 the code.
@@ -148,14 +209,17 @@ in-app What's New window both pick it up automatically.
 
 ## What's not done yet
 
-- Flashing a ROM to a GBA cart. The reading, saving and patching all work; the
-  write path is the next big piece. It needs testing against a real
-  reflashable cart, since a retail mask-ROM cart physically can't be written.
+- Save-type patching. Writing a ROM works, but a game whose save type doesn't
+  match the cart won't save. Patching a ROM to save somewhere else needs a
+  compiled payload injected into the ROM, which is a different kind of job from
+  everything else here. For now that step is handled by external tools.
 - The game database only has a few dozen titles seeded in it right now. Every
   dump you make gets remembered by hash, so exact names build up over time, but a
   full No-Intro import is on the list.
 - Atmel-type flash saves. The common flash save path is done; the handful of
   older Atmel carts would need their own write routine.
+- Writing to GB and GBC flash carts. The GBA write path is done; the Game Boy
+  side would need its own routine and a cart to test against.
 
 ## Thanks
 
@@ -167,7 +231,7 @@ This wouldn't exist without a lot of other people's work:
 - **insideGadgets** for the GBxCart RW hardware and the serial protocol this
   whole app is built to speak.
 - **Lesserkuma** and the FlashGBX project, the reference for how title and
-  save-type resolution should work.
+  save-type resolution should work, and for how the flash write path is driven.
 
 The original licenses for the patchers live in the `licenses/` folder.
 

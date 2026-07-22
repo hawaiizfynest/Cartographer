@@ -745,6 +745,42 @@ def test_flash_id_unknown_chip_is_reported_not_guessed():
     assert "not in the database" in result.summary()
 
 
+def test_save_flash_id_known_chip():
+    from cartographer import flash_db
+    # Panasonic MN63F805MNP, device byte first then manufacturer byte.
+    msg = flash_db.interpret_save_flash_id(bytes([0x32, 0x1B, 0x00, 0x00]))
+    assert "Panasonic" in msg
+    assert "0x1B32" in msg
+    assert "games know how to write" in msg
+
+
+def test_save_flash_id_unknown_chip_is_flagged():
+    from cartographer import flash_db
+    msg = flash_db.interpret_save_flash_id(bytes([0xAB, 0xCD, 0x00, 0x00]))
+    assert "not one of the chips games recognise" in msg
+    assert "0xCDAB" in msg
+
+
+def test_save_flash_id_no_chip_responding():
+    from cartographer import flash_db
+    for filler in (0x00, 0xFF):
+        msg = flash_db.interpret_save_flash_id(bytes([filler] * 4))
+        assert "not a real chip id" in msg
+
+
+def test_save_flash_id_no_response_at_all():
+    from cartographer import flash_db
+    msg = flash_db.interpret_save_flash_id(b"")
+    assert "did not return" in msg
+
+
+def test_save_flash_lookup_table():
+    from cartographer import flash_db
+    assert flash_db.lookup_save_flash(0x1B32)[0] == "Panasonic MN63F805MNP"
+    assert flash_db.lookup_save_flash(0x1B32)[1] == 65536
+    assert flash_db.lookup_save_flash(0xDEAD) is None
+
+
 def test_known_bad_markings():
     from cartographer import flash_db
     assert flash_db.is_known_bad_marking("XYZ6600")
