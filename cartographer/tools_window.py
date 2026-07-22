@@ -1,6 +1,6 @@
 """
-tools_window.py - offline ROM tools: apply IPS/BPS/UPS patches and Game Genie
-codes to a ROM file. No device needed.
+tools_window.py - offline ROM and save tools: apply IPS/BPS/UPS patches, bake
+Game Genie codes into a ROM, and compare or inspect save files. No device needed.
 
 Written by LJ "HawaiizFynest" Eblacas
 """
@@ -20,7 +20,7 @@ from . import __app_name__
 class ToolsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"{__app_name__} - ROM tools")
+        self.setWindowTitle(f"{__app_name__} - ROM and save tools")
         self.setMinimumSize(620, 480)
         v = QVBoxLayout(self)
         tabs = QTabWidget()

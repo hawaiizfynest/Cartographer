@@ -101,7 +101,8 @@ class DeviceWindow(QMainWindow):
         tools_menu = bar.addMenu("Tools")
         act_batch = tools_menu.addAction("Batch dump (multiple carts)\u2026")
         act_batch.triggered.connect(self.on_batch_dump)
-        act_rom_tools = tools_menu.addAction("ROM tools (patches, cheats)\u2026")
+        act_rom_tools = tools_menu.addAction(
+            "ROM and save tools (patches, cheats, compare saves)\u2026")
         act_rom_tools.triggered.connect(self.on_rom_tools)
         act_library = tools_menu.addAction("Library\u2026")
         act_library.triggered.connect(self.on_library)
