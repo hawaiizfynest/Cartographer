@@ -855,7 +855,6 @@ def test_open_converts_a_missing_port_too():
     finally:
         serial.Serial = original
 
-
 def test_save_flash_id_reads_the_two_bytes_the_firmware_sends():
     """The firmware answers read-ID with two bytes and nothing more. Reading it
     as a 64-byte stream times out waiting for the rest and discards the answer,

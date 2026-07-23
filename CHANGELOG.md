@@ -25,6 +25,7 @@
   the code and gives the advice that fits instead of blaming another program
   every time.
 
+
 ## v1.2.1
 
 - Fixed Cartographer closing itself when a connection fails. Opening a serial
