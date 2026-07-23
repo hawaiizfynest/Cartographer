@@ -847,17 +847,22 @@ class DeviceWindow(QMainWindow):
         QApplication.processEvents()
         try:
             self.dev.open(port)
-        except gx.GBxCartError as exc:
+            self.log("Link established. Identifying device\u2026")
+            QApplication.processEvents()
+            self.info = self.dev.identify()
+            fast = self.dev.check_fast_read()
+        except (gx.GBxCartError, OSError) as exc:
+            # The handshake talks to the port as well as opening it, so a writer
+            # pulled mid-identify raises here too. Everything down this path has
+            # to be caught: an exception escaping a slot takes the whole app
+            # down under PyQt6, which looks like Cartographer closing itself.
+            self.dev.close()
             self.bar.setMaximum(100)
             self.bar.setValue(0)
             self.btn_connect.setEnabled(True)
             QMessageBox.critical(self, __app_name__, f"Could not connect:\n{exc}")
             self.log(f"Connect failed: {exc}")
             return
-        self.log("Link established. Identifying device\u2026")
-        QApplication.processEvents()
-        self.info = self.dev.identify()
-        fast = self.dev.check_fast_read()
         self.bar.setMaximum(100)
         self.bar.setValue(0)
         self.lbl_fw.setText(f"R{self.info.firmware}  PCB {self.info.pcb_name}"
@@ -886,14 +891,18 @@ class DeviceWindow(QMainWindow):
         self.log("Disconnected.")
 
     def on_read_info(self) -> None:
-        self.info = self.dev.identify()
-        self.lbl_mode.setText(self.info.cart_mode_name)
         try:
+            self.info = self.dev.identify()
+            self.lbl_mode.setText(self.info.cart_mode_name)
             if self._is_gba():
                 self._read_gba_info()
             else:
                 self._read_gb_info()
-        except gx.GBxCartError as exc:
+        except (gx.GBxCartError, OSError) as exc:
+            # identify() used to sit outside this, and the catch used to be
+            # GBxCartError only, so a serial error here escaped and closed the
+            # app. on_connect calls this at the end, which is how a connect
+            # could still die after the connect itself was guarded.
             self.log(f"Read info failed: {exc}")
             QMessageBox.warning(self, __app_name__, str(exc))
 
