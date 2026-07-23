@@ -1,5 +1,63 @@
 # Changelog
 
+## v1.2.2
+
+- The save type override is remembered between launches. It used to reset every
+  time the app started, which quietly put backup and restore back on the type
+  the game code claims. On a repro cart that is the wrong type, and the first
+  sign of it was a backup that came out the wrong size.
+- Identify save chip no longer calls itself read-only when it cannot be. There
+  is no separate bus for the save chip on a GBA cart, so a read-ID is a
+  sequence of ordinary writes into the save address space. A flash chip reads
+  those as commands and its contents are untouched, which is where the
+  read-only claim came from, but a cart with plain battery-backed RAM in the
+  save space has nothing decoding them and they land as data on a real save.
+  The check now warns before running on anything that does not read as flash,
+  and reports whether the command addresses changed, which answers whether the
+  save space is flash or RAM as a side effect.
+- Connecting now tries both speeds before giving up. Opening a serial port
+  configures it as well, so a driver that refuses one speed can still accept
+  the other, and stopping at the first refusal turned a recoverable problem
+  into a port that would not open at all.
+- Connection errors say what actually went wrong. Windows reports a busy port,
+  a port that has gone away and a driver that refuses the settings as the same
+  kind of error, and the fix for each is different, so the message now reads
+  the code and gives the advice that fits instead of blaming another program
+  every time.
+
+## v1.2.1
+
+- Fixed Cartographer closing itself when a connection fails. Opening a serial
+  port can be refused by Windows, when another program holds it or when the
+  writer has been unplugged since the port list was drawn, and that refusal was
+  reaching the connect handler as a kind of error it did not catch. An
+  uncaught error closes a Qt app outright, so the window disappeared with
+  nothing on screen to say why. A failed connect now says what went wrong and
+  leaves the app running. The same cover extends over the identify step, which
+  is where a writer pulled mid-handshake used to land.
+- Added a crash log. Anything that goes wrong and is not handled somewhere more
+  specific now writes to crash.log next to the settings file and shows what
+  happened, rather than closing the window.
+- Reading the cart info after a connect is covered the same way. That step runs
+  at the end of every connect and had the same gap, so a writer that answered
+  the handshake and then stopped responding still took the window with it.
+
+## v1.2.0
+
+- Fixed Identify save chip reporting no answer from a chip that was answering.
+  The device replies to a read-ID with two bytes and nothing more, but the tool
+  read that reply the way it reads a ROM dump, which takes a 64-byte block and
+  then asks the device to continue. The wait for the rest of the block timed
+  out and threw away the two bytes already in hand, so every cart came back as
+  "the device did not return a save flash id" no matter which chip was fitted.
+  It now reads the two bytes the firmware sends.
+- The chip report covers more cases. If the two bytes arrive in the reverse
+  order it still names the chip and says so, instead of calling a part games
+  know unrecognised. If the maker byte is one of the five used for GBA save
+  chips but the device byte is unfamiliar, it says a real chip is answering and
+  names the maker. A one-byte reply is called out as a short read rather than
+  being treated as an id.
+
 ## v1.1.9
 
 - Added Tools > Identify save chip. A flash save lives on its own small chip,

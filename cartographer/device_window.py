@@ -43,7 +43,14 @@ class DeviceWindow(QMainWindow):
         # restore. Needed for ROMs that have been save-type patched: patching
         # does not change the game code, so the database still reports the
         # original type while the ROM now saves somewhere else entirely.
-        self.save_override: str = ""
+        # Restored from settings rather than reset each launch. Losing it on a
+        # restart silently sends backup and restore back to the type the game
+        # code claims, which on a repro cart is the wrong one, and a backup
+        # taken that way is the wrong size before anyone notices.
+        from . import settings as _settings
+        self.save_override: str = _settings.get("save_override") or ""
+        if self.save_override not in gx.SAVE_LAYOUT:
+            self.save_override = ""
         self.resolved_title: str = ""
         self.game_code: str = ""
 
@@ -774,15 +781,18 @@ class DeviceWindow(QMainWindow):
             labels, current, False)
         if not ok:
             return
+        from . import settings
         if choice == labels[0]:
             self.save_override = ""
+            settings.set("save_override", "")
             self.log("Save type override cleared; using the detected type "
                      f"({detected}).")
         else:
             self.save_override = choice.split()[0]
+            settings.set("save_override", self.save_override)
             self.log(f"Save type override set to {self.save_override}. Backup "
                      f"and restore will use it instead of the detected type "
-                     f"({detected}).")
+                     f"({detected}). It is remembered between launches.")
         self._refresh_save_label()
 
     def on_identify_save_chip(self) -> None:
@@ -793,13 +803,55 @@ class DeviceWindow(QMainWindow):
                 "Identifying the save chip applies to GBA carts. Set the switch "
                 "to GBA with the cart inserted.")
             return
-        self.log("Reading the save flash chip id (read-only)\u2026")
+
+        # There is no separate bus for the save chip on GBA. A read-ID is a
+        # sequence of ordinary writes into the save address space, which a flash
+        # chip takes as commands and anything else takes as data. On a cart with
+        # plain battery-backed RAM those writes land on a real save, so this is
+        # only read-only where there is a flash chip to do the interpreting.
+        kind = self._save_kind()
+        if kind not in (gx.SAVE_FLASH_512K, gx.SAVE_FLASH_1M):
+            answer = QMessageBox.warning(
+                self, __app_name__,
+                f"This cart's save type reads as {kind or 'unknown'}, not flash."
+                f"\n\n"
+                f"Identifying the chip means writing a flash command sequence "
+                f"into the save address space. A flash chip treats those writes "
+                f"as commands and its contents are untouched. Anything else "
+                f"treats them as data, which would put a few bytes on top of a "
+                f"real save.\n\n"
+                f"Back the save up first if it matters. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                self.log("Save chip check canceled.")
+                return
+
+        self.log("Reading the save flash chip id\u2026")
 
         def job(progress, log, cancel):
+            before = [self.dev.gba_read_save_bytes(a, 1)
+                      for a in gx.GBxCart.FLASH_CMD_ADDRESSES]
             data = self.dev.gba_save_flash_id()
+            after = [self.dev.gba_read_save_bytes(a, 1)
+                     for a in gx.GBxCart.FLASH_CMD_ADDRESSES]
             if data:
                 log("  raw: " + " ".join(f"{b:02X}" for b in data[:8]))
             log(flash_db.interpret_save_flash_id(data))
+            if all(before) and all(after):
+                if before == after:
+                    log("  The command addresses read the same before and "
+                        "after, so nothing in the save was disturbed.")
+                else:
+                    changed = ", ".join(
+                        f"0x{a:04X} {b.hex().upper()}->{c.hex().upper()}"
+                        for a, b, c in zip(gx.GBxCart.FLASH_CMD_ADDRESSES,
+                                           before, after) if b != c)
+                    log(f"  Command addresses changed ({changed}). The save "
+                        f"space took those writes as data instead of commands, "
+                        f"which means there is no flash chip decoding them. "
+                        f"This is RAM, and those bytes of the save were "
+                        f"overwritten.")
 
         self._start(job, "Save chip check complete.")
 
@@ -847,17 +899,22 @@ class DeviceWindow(QMainWindow):
         QApplication.processEvents()
         try:
             self.dev.open(port)
-        except gx.GBxCartError as exc:
+            self.log("Link established. Identifying device\u2026")
+            QApplication.processEvents()
+            self.info = self.dev.identify()
+            fast = self.dev.check_fast_read()
+        except (gx.GBxCartError, OSError) as exc:
+            # The handshake talks to the port as well as opening it, so a writer
+            # pulled mid-identify raises here too. Everything down this path has
+            # to be caught: an exception escaping a slot takes the whole app
+            # down under PyQt6, which looks like Cartographer closing itself.
+            self.dev.close()
             self.bar.setMaximum(100)
             self.bar.setValue(0)
             self.btn_connect.setEnabled(True)
             QMessageBox.critical(self, __app_name__, f"Could not connect:\n{exc}")
             self.log(f"Connect failed: {exc}")
             return
-        self.log("Link established. Identifying device\u2026")
-        QApplication.processEvents()
-        self.info = self.dev.identify()
-        fast = self.dev.check_fast_read()
         self.bar.setMaximum(100)
         self.bar.setValue(0)
         self.lbl_fw.setText(f"R{self.info.firmware}  PCB {self.info.pcb_name}"
@@ -886,14 +943,18 @@ class DeviceWindow(QMainWindow):
         self.log("Disconnected.")
 
     def on_read_info(self) -> None:
-        self.info = self.dev.identify()
-        self.lbl_mode.setText(self.info.cart_mode_name)
         try:
+            self.info = self.dev.identify()
+            self.lbl_mode.setText(self.info.cart_mode_name)
             if self._is_gba():
                 self._read_gba_info()
             else:
                 self._read_gb_info()
-        except gx.GBxCartError as exc:
+        except (gx.GBxCartError, OSError) as exc:
+            # identify() used to sit outside this, and the catch used to be
+            # GBxCartError only, so a serial error here escaped and closed the
+            # app. on_connect calls this at the end, which is how a connect
+            # could still die after the connect itself was guarded.
             self.log(f"Read info failed: {exc}")
             QMessageBox.warning(self, __app_name__, str(exc))
 

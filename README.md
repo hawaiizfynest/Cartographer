@@ -84,8 +84,18 @@ and run it. No install, no Python needed.
   share one ID across 16, 32 and 64 MB parts, so the ID alone can't tell them
   apart.
 - Identifies the save flash chip too, which is a separate chip from the ROM flash.
-  Games read that chip's ID before writing a save, so a chip whose ID a game
-  doesn't recognise is one the game won't write to.
+  Games read that chip's ID before writing a save, and they also check its
+  capacity, so a cart can hold a chip games know and still refuse to save a game
+  that wants a different size. Reading that ID is the quickest way to find out
+  what a cart actually provides, rather than trusting what the ROM asks for.
+- Reading the save chip's ID is not free the way the ROM flash probe is. GBA
+  carts have no separate bus for the save chip, so the ID request is a sequence
+  of ordinary writes into the save address space. A flash chip reads those as
+  commands and its contents are untouched. A cart with plain battery-backed RAM
+  has nothing decoding them, and they land as data on a real save. Cartographer
+  warns before running the check on anything that doesn't read as flash, and
+  afterwards reports whether the command addresses changed, which tells you
+  which of the two you have.
 
 ### Save tools
 
@@ -98,10 +108,11 @@ and run it. No install, no Python needed.
   and a find box that takes text or hex. Edits are written to a new file, so the
   original is untouched. Alongside it sits a panel showing which regions hold data
   and which are blank, plus any readable text with its offset.
-- Lets you override the detected save type. Backup and restore normally use the
-  type looked up from the game code, which is right for an unmodified game and
-  wrong for a patched one: a save-type patch changes where a game saves but leaves
-  the game code alone.
+- Lets you override the detected save type, and remembers it between launches.
+  Backup and restore normally use the type looked up from the game code, which is
+  right for an unmodified game and wrong in two cases: a save-type patch changes
+  where a game saves but leaves the game code alone, and a repro cart's game code
+  describes whichever ROM is loaded rather than the board the save chip is on.
 
 ### Patching
 
@@ -213,6 +224,8 @@ in-app What's New window both pick it up automatically.
   match the cart won't save. Patching a ROM to save somewhere else needs a
   compiled payload injected into the ROM, which is a different kind of job from
   everything else here. For now that step is handled by external tools.
+  Identifying the save chip at least tells you what the cart provides, so you
+  know which type to patch towards instead of guessing.
 - The game database only has a few dozen titles seeded in it right now. Every
   dump you make gets remembered by hash, so exact names build up over time, but a
   full No-Intro import is on the list.
