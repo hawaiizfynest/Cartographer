@@ -448,6 +448,8 @@ class GBxCart:
     flash_poll_s = 0.1
     # Poll interval while waiting for a single word to finish programming.
     flash_poll_word_s = 0.0
+    # How long to wait for the two bytes of a save-flash read-ID, in seconds.
+    save_id_timeout_s = 1.0
 
     def gba_flash_write_address_byte(self, address: int, byte: int) -> None:
         """Write a command byte to the GBA flash cart bus. The address is halved
@@ -504,20 +506,30 @@ class GBxCart:
         fine from a flasher and still refuse to save in a game.
 
         Uses the device's dedicated read-ID command, which enters ID mode, reads
-        the ID and leaves ID mode in one operation. Returns the bytes read, or
-        b"" if the device does not implement the command.
+        the ID and leaves ID mode in one operation.
+
+        The firmware answers this command with exactly TWO bytes, manufacturer
+        first and device second, and then sends nothing else. It is not a
+        streamed read and must not go through _read_stream: that reader wants a
+        full 64-byte block, asks the device to continue, gets nothing, and
+        raises a timeout, which throws away the two bytes the chip already sent.
+        A live chip then looks like no chip at all.
+
+        Returns the bytes read, normally two. An empty result means the device
+        sent nothing back.
         """
-        import io
-        try:
-            self.select_gba()
-            self.ser.reset_input_buffer()  # type: ignore[union-attr]
-            self.set_mode(GBA_FLASH_READ_ID)
-            time.sleep(0.1)
-            buf = io.BytesIO()
-            self._read_stream(buf, 64, _noop, _never)
-            return buf.getvalue()[:8]
-        except Exception:  # noqa: BLE001 - a clone may not implement 'i'
-            return b""
+        s = self._require()
+        self.select_gba()
+        s.reset_input_buffer()
+        self.set_mode(GBA_FLASH_READ_ID)
+        buf = bytearray()
+        deadline = time.monotonic() + self.save_id_timeout_s
+        while len(buf) < 2 and time.monotonic() < deadline:
+            chunk = s.read(2 - len(buf))
+            if chunk:
+                buf += chunk
+        s.reset_input_buffer()
+        return bytes(buf)
 
     def gba_flash_erase_sector(self, sector_addr: int, unlock_a1: int = 0xAAA,
                                unlock_a2: int = 0x555,

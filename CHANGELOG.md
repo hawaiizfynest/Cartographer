@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.2.0
+
+- Fixed Identify save chip reporting no answer from a chip that was answering.
+  The device replies to a read-ID with two bytes and nothing more, but the tool
+  read that reply the way it reads a ROM dump, which takes a 64-byte block and
+  then asks the device to continue. The wait for the rest of the block timed
+  out and threw away the two bytes already in hand, so every cart came back as
+  "the device did not return a save flash id" no matter which chip was fitted.
+  It now reads the two bytes the firmware sends.
+- The chip report covers more cases. If the two bytes arrive in the reverse
+  order it still names the chip and says so, instead of calling a part games
+  know unrecognised. If the maker byte is one of the five used for GBA save
+  chips but the device byte is unfamiliar, it says a real chip is answering and
+  names the maker. A one-byte reply is called out as a short read rather than
+  being treated as an id.
+
 ## v1.1.9
 
 - Added Tools > Identify save chip. A flash save lives on its own small chip,
