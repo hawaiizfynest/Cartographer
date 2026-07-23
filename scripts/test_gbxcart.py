@@ -27,7 +27,7 @@ class FakeSerial:
 
     def __init__(self, rom=b"", sram=b"", mode=gx.GBA_MODE, fw=20, pcb=3,
                  flash_id=None, flash_variant="AAA/AA", requires_5v=False,
-                 cfi_variant=None):
+                 cfi_variant=None, save_flash_id=None):
         self.rom = rom
         self.sram = sram
         self.mode = mode
@@ -35,6 +35,10 @@ class FakeSerial:
         self.pcb = pcb
         # flash_id: 8-byte response returned in read-ID mode (None = mask ROM)
         self.flash_id = flash_id
+        # save_flash_id: the TWO bytes the firmware sends back for 'i', the
+        # save-flash read-ID. Two is all it sends, which is the whole point:
+        # a reader that waits for more gets nothing and loses these.
+        self.save_flash_id = save_flash_id
         self.flash_variant = flash_variant
         # requires_5v: if True, the chip only answers flash commands at 5V, like
         # the real Gugxiom/EpicJoy S29GL repro carts. The probe must have sent the
@@ -470,6 +474,9 @@ class FakeSerial:
                 self._begin_stream(self.sram, self._addr)
         elif cmd == "e":          # GBA read EEPROM, 8-byte blocks
             self._begin_eeprom_stream()
+        elif cmd == "i":          # GBA save flash read-ID: exactly 2 bytes
+            if self.save_flash_id:
+                self._out += bytes(self.save_flash_id[:2])
         elif cmd == "1":          # continue
             if self._stream is not None:
                 self._queue_block()
@@ -745,9 +752,130 @@ def test_flash_id_unknown_chip_is_reported_not_guessed():
     assert "not in the database" in result.summary()
 
 
+def test_open_converts_a_refused_port_into_a_reportable_error():
+    """pyserial raises SerialException, an OSError, when the OS refuses a port.
+    The connect handler only catches GBxCartError, and an exception escaping a
+    slot aborts the whole app under PyQt6, so the window closes with nothing on
+    screen. open() has to convert it."""
+    import serial
+    original = serial.Serial
+
+    def refuse(*args, **kwargs):
+        raise serial.SerialException("Access is denied.")
+
+    serial.Serial = refuse
+    try:
+        raised = None
+        try:
+            gx.GBxCart().open("COM4")
+        except gx.GBxCartError as exc:
+            raised = exc
+        assert raised is not None, "an OSError escaped instead of GBxCartError"
+        assert "COM4" in str(raised)
+    finally:
+        serial.Serial = original
+
+
+def test_save_space_read_targets_the_right_address():
+    """The read-ID probe checks the two flash command addresses before and
+    after so it can say whether it disturbed a real save. That check is only
+    worth anything if the read lands where it was asked to."""
+    sram = bytes(range(256)) * 256
+    dev = _connect(FakeSerial(sram=sram, mode=gx.GBA_MODE))
+    assert dev.gba_read_save_bytes(0x2AAA, 1) == sram[0x2AAA:0x2AAB]
+    assert dev.gba_read_save_bytes(0x5555, 4) == sram[0x5555:0x5559]
+
+
+def test_flash_command_addresses_are_the_amd_pair():
+    assert gx.GBxCart.FLASH_CMD_ADDRESSES == (0x5555, 0x2AAA)
+
+
+def test_open_tries_both_rates_before_giving_up():
+    """Opening a port configures it as well as opening it, so a driver that
+    refuses one speed can still take the other. Bailing on the first failure
+    turns a recoverable speed problem into a dead port."""
+    import serial
+    original = serial.Serial
+    attempts = []
+
+    def refuse(*args, **kwargs):
+        attempts.append(kwargs.get("baudrate", args[1] if len(args) > 1 else None))
+        raise serial.SerialException("Incorrect function.")
+
+    serial.Serial = refuse
+    try:
+        try:
+            gx.GBxCart().open("COM4")
+        except gx.GBxCartError:
+            pass
+        assert len(attempts) == 2, f"only tried {len(attempts)} rate(s)"
+        assert attempts == [gx.BAUD_PRIMARY, gx.BAUD_FALLBACK]
+    finally:
+        serial.Serial = original
+
+
+def test_port_error_text_matches_the_windows_code():
+    """Windows sends very different problems through one exception type, and
+    each has a different fix. A busy port and a driver fault must not produce
+    the same advice."""
+    busy = PermissionError(13, "Access is denied.")
+    busy.winerror = 5
+    gone = FileNotFoundError(2, "cannot find the file")
+    gone.winerror = 2
+    refused = OSError(22, "Incorrect function.")
+    refused.winerror = 1
+
+    busy_text = gx._port_error_text("COM4", [(1000000, busy)])
+    gone_text = gx._port_error_text("COM4", [(1000000, gone)])
+    refused_text = gx._port_error_text("COM4", [(1000000, refused),
+                                                (1700000, refused)])
+
+    assert "Another program" in busy_text
+    assert "not there any more" in gone_text
+    assert "driver refused" in refused_text
+    assert "not the same as the port being busy" in refused_text
+    assert "Another program" not in refused_text
+
+
+def test_open_converts_a_missing_port_too():
+    import serial
+    original = serial.Serial
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("no such port")
+
+    serial.Serial = missing
+    try:
+        raised = None
+        try:
+            gx.GBxCart().open("COM9")
+        except gx.GBxCartError as exc:
+            raised = exc
+        assert raised is not None
+    finally:
+        serial.Serial = original
+
+
+def test_save_flash_id_reads_the_two_bytes_the_firmware_sends():
+    """The firmware answers read-ID with two bytes and nothing more. Reading it
+    as a 64-byte stream times out waiting for the rest and discards the answer,
+    which made a chip that was replying look like no chip at all."""
+    dev = _connect(FakeSerial(mode=gx.GBA_MODE,
+                              save_flash_id=bytes([0x32, 0x1B])))
+    dev.save_id_timeout_s = 0.05
+    assert dev.gba_save_flash_id() == bytes([0x32, 0x1B])
+
+
+def test_save_flash_id_is_empty_only_when_nothing_answers():
+    dev = _connect(FakeSerial(mode=gx.GBA_MODE, save_flash_id=None))
+    dev.save_id_timeout_s = 0.05
+    assert dev.gba_save_flash_id() == b""
+
+
 def test_save_flash_id_known_chip():
     from cartographer import flash_db
-    # Panasonic MN63F805MNP, device byte first then manufacturer byte.
+    # Panasonic MN63F805MNP: manufacturer byte 0x32 first, device byte 0x1B
+    # second, which keys the table as 0x1B32.
     msg = flash_db.interpret_save_flash_id(bytes([0x32, 0x1B, 0x00, 0x00]))
     assert "Panasonic" in msg
     assert "0x1B32" in msg
@@ -772,6 +900,29 @@ def test_save_flash_id_no_response_at_all():
     from cartographer import flash_db
     msg = flash_db.interpret_save_flash_id(b"")
     assert "did not return" in msg
+
+
+def test_save_flash_id_swapped_bytes_still_identified():
+    from cartographer import flash_db
+    # Same Panasonic part with the pair reversed. Reporting a chip games know
+    # as unrecognised is the expensive mistake here, so check both orders.
+    msg = flash_db.interpret_save_flash_id(bytes([0x1B, 0x32]))
+    assert "Panasonic" in msg
+    assert "other way round" in msg
+
+
+def test_save_flash_id_known_maker_unknown_device():
+    from cartographer import flash_db
+    msg = flash_db.interpret_save_flash_id(bytes([0xC2, 0x77]))
+    assert "Macronix" in msg
+    assert "real chip is answering" in msg
+
+
+def test_save_flash_id_single_byte_response():
+    from cartographer import flash_db
+    msg = flash_db.interpret_save_flash_id(bytes([0x32]))
+    assert "Only one byte" in msg
+    assert "Panasonic" in msg
 
 
 def test_save_flash_lookup_table():

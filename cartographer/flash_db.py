@@ -118,11 +118,12 @@ SUPPORTED_CHIPS = [
 KNOWN_BAD_MARKINGS = ("6600", "4050M")
 
 
-# The small flash chips used for GBA saves, keyed on the 16-bit id a read-ID
-# command returns (device byte first, then manufacturer byte, as the chip
-# presents it). Games check this id before writing a save and drive the chip
-# with the command sequence that chip expects, so a chip whose id a game does
-# not recognise is one the game will refuse to write to. Capacity is in bytes.
+# The small flash chips used for GBA saves. The device answers a read-ID with
+# two bytes, MANUFACTURER first and device second, so the 16-bit key below is
+# (device << 8) | manufacturer, which is the form these parts are written up in
+# everywhere. Games check this id before writing a save and drive the chip with
+# the command sequence that chip expects, so a chip whose id a game does not
+# recognise is one the game will refuse to write to. Capacity is in bytes.
 SAVE_FLASH_IDS = {
     0x1B32: ("Panasonic MN63F805MNP", 65536),
     0x3D1F: ("Atmel AT29LV512", 65536),
@@ -130,6 +131,17 @@ SAVE_FLASH_IDS = {
     0x1CC2: ("Macronix MX29L512", 65536),
     0x09C2: ("Macronix MX29L010", 131072),
     0x1362: ("Sanyo LE26FV10N1TS", 131072),
+}
+
+# Manufacturer bytes on their own. A known maker with an unfamiliar device byte
+# still tells you a real chip is answering, which is a different situation from
+# silence, and it narrows down what the part is likely to be.
+SAVE_FLASH_MAKERS = {
+    0x1F: "Atmel",
+    0x32: "Panasonic",
+    0x62: "Sanyo",
+    0xBF: "SST",
+    0xC2: "Macronix",
 }
 
 
@@ -147,9 +159,16 @@ def interpret_save_flash_id(data: bytes) -> str:
     corrupt, even though a flasher can read and write the same chip fine.
     """
     if not data:
-        return ("The device did not return a save flash id. This firmware may "
-                "not implement the read-ID command.")
+        return ("The device did not return a save flash id. Nothing came back "
+                "at all, so either this firmware does not implement the read-ID "
+                "command or the read was cut short before the chip answered.")
     hexed = " ".join(f"{b:02X}" for b in data[:8])
+    if len(data) < 2:
+        maker = SAVE_FLASH_MAKERS.get(data[0])
+        who = f" That byte is {maker}." if maker else ""
+        return (f"Only one byte came back ({hexed}) where a chip id is two.{who} "
+                f"Run the check again. If it stays at one byte, something is "
+                f"answering but not completing the id.")
     if all(b == 0x00 for b in data[:2]) or all(b == 0xFF for b in data[:2]):
         return (f"Save flash id read back as {hexed}, which is not a real chip "
                 f"id. Either there is no flash save chip responding, or it does "
@@ -160,6 +179,21 @@ def interpret_save_flash_id(data: bytes) -> str:
         name, cap = known
         return (f"Save flash chip: {name} (id 0x{chip_id:04X}, "
                 f"{cap // 1024} KB). This is a chip games know how to write.")
+    swapped = data[1] | (data[0] << 8)
+    known_swapped = lookup_save_flash(swapped)
+    if known_swapped:
+        name, cap = known_swapped
+        return (f"Save flash chip: {name} (id 0x{swapped:04X}, {cap // 1024} "
+                f"KB), reported with its two bytes the other way round (raw "
+                f"{hexed}). This is a chip games know how to write.")
+    maker = SAVE_FLASH_MAKERS.get(data[0])
+    if maker:
+        return (f"Save flash id 0x{chip_id:04X} (raw {hexed}). The maker byte "
+                f"is {maker}, so a real chip is answering, but device byte "
+                f"0x{data[1]:02X} is not one of the parts games check for. A "
+                f"game that checks the id before saving will refuse to write, "
+                f"which looks like a save that will not stick or reads as "
+                f"corrupt.")
     return (f"Save flash id 0x{chip_id:04X} (raw {hexed}) is not one of the "
             f"chips games recognise. A flasher can still read and write it, but "
             f"a game that checks the id before saving will refuse to write, "

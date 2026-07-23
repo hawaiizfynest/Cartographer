@@ -96,6 +96,20 @@ def test_pipeline_skips_sram_for_native_sram():
     assert res.save_id == ""
 
 
+def test_sram_patch_alone_leaves_no_batteryless_payload():
+    """The SRAM-only action exists so a ROM can be handed to another tool for
+    the next stage. If it dragged the batteryless payload along, the second
+    tool would be patching an already-rewritten ROM."""
+    rom = bytearray(_build_flash1m_rom())
+    alone = sp.patch_rom(bytes(rom))
+    chained = pipeline.prepare_for_batteryless(bytes(rom), blp.MODE_AUTO,
+                                               sram_patch=True)
+    assert alone.data != chained.data, "SRAM-only produced the full chain"
+    assert len(alone.data) == len(rom), "SRAM-only should not resize the ROM"
+    assert alone.save_id
+    assert alone.patches_applied > 0
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

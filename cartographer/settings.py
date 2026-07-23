@@ -35,6 +35,7 @@ _DEFAULTS = {
     "write_dump_report": True,  # write a verification report next to each dump
     "check_updates_on_start": True,
     "library_folder": "",       # folder the library view scans
+    "save_override": "",        # save type forced by hand ("" = use detection)
 }
 
 

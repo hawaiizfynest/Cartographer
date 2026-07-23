@@ -228,6 +228,42 @@ class GBxCartError(Exception):
     pass
 
 
+def _port_error_text(port: str, failures: list) -> str:
+    """Turn a failed port open into something worth reading.
+
+    Windows reports very different problems through the same exception type, and
+    the fix for each is different, so the code matters. Guessing at "the port is
+    busy" for all of them sends people to Task Manager for a driver fault.
+    """
+    exc = failures[-1][1]
+    winerror = getattr(exc, "winerror", None)
+    rates = " and ".join(f"{baud // 1000}k" for baud, _ in failures)
+
+    if winerror == 5 or isinstance(exc, PermissionError):
+        why = ("Another program is holding the port. Close any other copy of "
+               "Cartographer, and any serial terminal or flashing tool, then "
+               "try again.")
+    elif winerror == 2 or isinstance(exc, FileNotFoundError):
+        why = ("The port is not there any more. The writer was unplugged, or "
+               "Windows has moved it to a different COM number. Unplug it, "
+               "plug it back in, then click Refresh and pick the port again.")
+    elif winerror == 1:
+        why = (f"The driver refused the port settings at {rates}, which is not "
+               f"the same as the port being busy.\n\n"
+               f"This is usually one of two things. Either the CH340 driver "
+               f"will not accept the speed this device needs, in which case "
+               f"reinstalling it fixes it, or Windows is holding a stale entry "
+               f"for a port that has been unplugged, in which case unplugging "
+               f"the writer and plugging it back in clears it.\n\n"
+               f"Check Device Manager for which COM port the writer actually "
+               f"takes when you plug it in. Old entries show up under "
+               f"View > Show hidden devices and can be uninstalled from there.")
+    else:
+        why = ("Unplug the writer, plug it back in, then click Refresh and "
+               "pick the port again.")
+    return f"Could not open {port}.\n\n{exc}\n\n{why}"
+
+
 class GBxCart:
     """Talks to a GBxCart RW / Cyclone over serial."""
 
@@ -260,9 +296,21 @@ class GBxCart:
     def open(self, port: str) -> int:
         """Open and handshake. Returns the detected cart mode (GB_MODE/GBA_MODE).
         Tries 1M then 1.7M baud, matching the device's auto-baud behaviour."""
+        failures: list[tuple[int, Exception]] = []
         for baud in (BAUD_PRIMARY, BAUD_FALLBACK):
             self.close()
-            self.ser = serial.Serial(port, baud, timeout=0.2, write_timeout=2)
+            try:
+                self.ser = serial.Serial(port, baud, timeout=0.2,
+                                         write_timeout=2)
+            except (OSError, ValueError) as exc:
+                # Opening a port also configures it, so a driver that refuses
+                # one speed can still accept another. Keep going and only give
+                # up once every rate has been tried. pyserial raises
+                # SerialException, an OSError, which has to be converted or it
+                # escapes the caller's handler and closes the app.
+                self.ser = None
+                failures.append((baud, exc))
+                continue
             self.baud = baud
             self.set_mode("0")          # clear any half-finished command
             self.ser.reset_input_buffer()
@@ -272,6 +320,8 @@ class GBxCart:
             if mode in (GB_MODE, GBA_MODE):
                 return mode
         self.close()
+        if len(failures) == 2:
+            raise GBxCartError(_port_error_text(port, failures)) from failures[-1][1]
         raise GBxCartError(
             "No valid response on this port at 1M or 1.7M baud. If this is the "
             "Cyclone, confirm the CH340 driver is installed and the cart/voltage "
@@ -448,6 +498,8 @@ class GBxCart:
     flash_poll_s = 0.1
     # Poll interval while waiting for a single word to finish programming.
     flash_poll_word_s = 0.0
+    # How long to wait for the two bytes of a save-flash read-ID, in seconds.
+    save_id_timeout_s = 1.0
 
     def gba_flash_write_address_byte(self, address: int, byte: int) -> None:
         """Write a command byte to the GBA flash cart bus. The address is halved
@@ -493,6 +545,27 @@ class GBxCart:
         self._read_stream(buf, count, _noop, _never)
         return buf.getvalue()[:count]
 
+    def gba_read_save_bytes(self, address: int, count: int = 1) -> bytes:
+        """Read raw bytes from the GBA save address space.
+
+        Used to look at the two addresses flash commands are sent to, so the
+        read-ID probe can say whether it disturbed anything.
+        """
+        import io
+        s = self._require()
+        s.reset_input_buffer()
+        self.set_number(address, SET_START_ADDRESS)
+        self.set_mode(GBA_READ_SRAM)
+        buf = io.BytesIO()
+        self._read_stream(buf, max(count, 1), _noop, _never)
+        return buf.getvalue()[:count]
+
+    # The two addresses an AMD-style flash command sequence is written to. On a
+    # flash chip these are command inputs and the data underneath is untouched.
+    # On a cart with plain RAM in the save space there is no command decoder, so
+    # the same writes land as data on top of whatever save was there.
+    FLASH_CMD_ADDRESSES = (0x5555, 0x2AAA)
+
     def gba_save_flash_id(self) -> bytes:
         """Read the ID of the cart's SAVE flash chip (not the ROM flash chip).
 
@@ -504,20 +577,30 @@ class GBxCart:
         fine from a flasher and still refuse to save in a game.
 
         Uses the device's dedicated read-ID command, which enters ID mode, reads
-        the ID and leaves ID mode in one operation. Returns the bytes read, or
-        b"" if the device does not implement the command.
+        the ID and leaves ID mode in one operation.
+
+        The firmware answers this command with exactly TWO bytes, manufacturer
+        first and device second, and then sends nothing else. It is not a
+        streamed read and must not go through _read_stream: that reader wants a
+        full 64-byte block, asks the device to continue, gets nothing, and
+        raises a timeout, which throws away the two bytes the chip already sent.
+        A live chip then looks like no chip at all.
+
+        Returns the bytes read, normally two. An empty result means the device
+        sent nothing back.
         """
-        import io
-        try:
-            self.select_gba()
-            self.ser.reset_input_buffer()  # type: ignore[union-attr]
-            self.set_mode(GBA_FLASH_READ_ID)
-            time.sleep(0.1)
-            buf = io.BytesIO()
-            self._read_stream(buf, 64, _noop, _never)
-            return buf.getvalue()[:8]
-        except Exception:  # noqa: BLE001 - a clone may not implement 'i'
-            return b""
+        s = self._require()
+        self.select_gba()
+        s.reset_input_buffer()
+        self.set_mode(GBA_FLASH_READ_ID)
+        buf = bytearray()
+        deadline = time.monotonic() + self.save_id_timeout_s
+        while len(buf) < 2 and time.monotonic() < deadline:
+            chunk = s.read(2 - len(buf))
+            if chunk:
+                buf += chunk
+        s.reset_input_buffer()
+        return bytes(buf)
 
     def gba_flash_erase_sector(self, sector_addr: int, unlock_a1: int = 0xAAA,
                                unlock_a2: int = 0x555,
