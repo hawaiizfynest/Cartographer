@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.2.4
+
+- Renamed the button that opens the patcher. It said "GBA batteryless patch",
+  which was accurate when a batteryless patch was the only thing behind it and
+  wrong the moment SRAM patch only arrived: nobody looking for an SRAM patch
+  clicks a button named after a different job. It now reads "GBA save patching
+  (batteryless / SRAM)", and the dialog says up front what each of its two
+  buttons does.
+- Added the save-compare tests to CI. Nine of the ten test suites ran on every
+  push and that one never did, so nineteen tests were only ever checked by hand.
+
 ## v1.2.3
 
 - Added SRAM patch only to the patcher window. The batteryless chain already

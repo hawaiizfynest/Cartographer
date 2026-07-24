@@ -620,7 +620,7 @@ class DeviceWindow(QMainWindow):
         self.btn_verify.clicked.connect(self.on_verify_file)
         self.btn_cartadvice = QPushButton("Which flash cart?\u2026")
         self.btn_cartadvice.clicked.connect(self.on_cart_advice)
-        self.btn_patch = QPushButton("GBA batteryless patch\u2026")
+        self.btn_patch = QPushButton("GBA save patching (batteryless / SRAM)\u2026")
         self.btn_patch.clicked.connect(self.on_patch)
         self.btn_write_rom = QPushButton("Write ROM to flash cart\u2026")
         self.btn_write_rom.clicked.connect(self.on_write_rom)

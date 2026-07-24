@@ -25,7 +25,7 @@ from . import sram_patcher
 class PatchDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("GBA Batteryless Save Patch")
+        self.setWindowTitle("GBA Save Patching")
         self.setMinimumWidth(580)
         self.rom_path: str = ""
 
@@ -34,10 +34,13 @@ class PatchDialog(QDialog):
         lay.setSpacing(12)
 
         intro = QLabel(
-            "Prepares a GBA ROM for a batteryless SRAM repro cart. For Flash/"
-            "EEPROM save games (e.g. Pokemon Gen 3) the ROM is SRAM-patched first, "
-            "then batteryless-patched. SRAM patch by bbsan2k; batteryless patch "
-            "and on-cart payload by metroid-maniac.")
+            "Two jobs live here. Prepare ROM does the full batteryless chain "
+            "for a batteryless SRAM repro cart: Flash and EEPROM save games "
+            "(Pokemon Gen 3, for instance) are SRAM-patched first, then "
+            "batteryless-patched. SRAM patch only stops after the first step, "
+            "for a ROM going on to another tool such as a flash-save patcher. "
+            "SRAM patch by bbsan2k; batteryless patch and on-cart payload by "
+            "metroid-maniac.")
         intro.setWordWrap(True)
         intro.setObjectName("hint")
         lay.addWidget(intro)
