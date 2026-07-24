@@ -7,7 +7,6 @@
   a separate flash-save patcher, which needs the SRAM step and nothing after
   it, meant reaching for another tool to do a job this app already carried.
 
-
 ## v1.2.2
 
 - The save type override is remembered between launches. It used to reset every
