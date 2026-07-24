@@ -60,6 +60,31 @@ def test_sram_game_on_flash_cart_skips_the_sram_step():
     a = ca.advise(SAVE_FLASH_1M, SAVE_SRAM_256K)
     assert not any("SRAM patch only" in s.text for s in a.steps)
     assert any("Flash 512K patch" in s.text for s in a.steps)
+    assert len(a.steps) == 1, "one patch, not two"
+
+
+def test_sram_on_flash_1m_is_proven_and_eeprom_is_not():
+    """Wario Land 4 through the flash patch onto a Flash 1M cart has been run
+    end to end. The EEPROM route on the same cart has not, and showing them at
+    the same confidence is how someone ends up assuming their hardware is at
+    fault."""
+    sram = ca.advise(SAVE_FLASH_1M, SAVE_SRAM_256K)
+    eeprom = ca.advise(SAVE_FLASH_1M, SAVE_EEPROM_4K)
+    assert sram.confidence == ca.PROVEN
+    assert eeprom.confidence == ca.UNPROVEN
+
+
+def test_sram_on_512k_cart_is_expected_not_claimed_as_proven():
+    """The 512K case follows from the same code but has not been run."""
+    a = ca.advise(SAVE_FLASH_512K, SAVE_SRAM_256K)
+    assert a.confidence == ca.EXPECTED
+
+
+def test_eeprom_route_records_that_the_flash_writing_itself_is_fine():
+    a = ca.advise(SAVE_FLASH_1M, SAVE_EEPROM_4K)
+    joined = " ".join(a.notes)
+    assert "SRAM game" in joined
+    assert "geometry" in joined
 
 
 def test_1m_game_on_512k_cart_is_blocked_for_space():
@@ -167,6 +192,28 @@ def test_flash_patch_step_names_the_right_input_file():
     eeprom = ca.advise(SAVE_FLASH_1M, SAVE_EEPROM_4K)
     flash_step = next(s for s in eeprom.steps if "Flash 512K patch" in s.text)
     assert "previous step" in flash_step.text
+
+
+def test_override_is_set_before_the_backup_that_depends_on_it():
+    """The backup is the safety net, and it reads the save area at whatever size
+    the override says. Setting the override after the backup means the net was
+    taken at the wrong size, which is no net at all."""
+    for game in (SAVE_SRAM_256K, SAVE_EEPROM_4K, SAVE_EEPROM_64K):
+        a = ca.advise(SAVE_FLASH_1M, game)
+        where = [s.where for s in a.procedure]
+        assert "Override" in where, f"{game} needs an override step"
+        assert where.index("Override") < where.index("Backup"), \
+            f"{game}: override must come before the backup"
+
+
+def test_no_override_step_when_the_cart_already_matches():
+    a = ca.advise(SAVE_FLASH_1M, SAVE_FLASH_1M)
+    assert "Override" not in [s.where for s in a.procedure]
+
+
+def test_override_appears_once_not_twice():
+    a = ca.advise(SAVE_FLASH_1M, SAVE_EEPROM_4K)
+    assert [s.where for s in a.procedure].count("Override") == 1
 
 
 def _run_all():

@@ -1,7 +1,24 @@
 # Changelog
 
+## v1.2.7
+
+- An SRAM game on a flash save cart is now marked as a route that works, having
+  been run end to end: Wario Land 4 through the Flash 512K patch onto a Macronix
+  MX29L010 cart, saving and surviving a power cycle. It needs one patch and no
+  SRAM patch first, since the game already writes the way the payload expects.
+- The EEPROM route says what that result rules out. The same payload drives the
+  same chips correctly for an SRAM game, sharing its erase and program routines
+  and asking more of the stack rather than less, so a failure on the EEPROM
+  route is in the save geometry and not in the flash writing. That is the
+  difference between a lead and a shrug.
+
 ## v1.2.6
 
+- The advisor sets the save type override before the first backup rather than
+  after it. Everything that reads or writes the save area works at whatever size
+  the override says, including the backup that is supposed to be the safety net,
+  so setting it afterwards meant the net had already been taken at the wrong
+  size.
 - The advisor gives the whole procedure, not just the route. Backing up what is
   already on the cart, blanking the save area, setting the override so a backup
   comes off the right size, and what to look at afterwards are the steps that
