@@ -202,20 +202,22 @@ def advise(cart_kind: str, game_kind: str, chip_name: str = "") -> Advice:
                 "The game needs 128 KB of save and this cart holds 64 KB. No "
                 "patch creates storage that is not there.")
             return advice
-        advice.confidence = UNPROVEN
+        advice.confidence = BLOCKED
         advice.notes.append(
-            "The game expects a 512K part and this cart holds a 1M one. Both "
-            "drive flash the same way, so try it with no patch at all first. "
-            "The only thing that can stop it is the game reading the chip id "
-            "and not recognising a part from the other size class.")
+            "Tested and it does not save. The game runs, but it reads the save "
+            "chip's id before writing, does not find a 512K part, and declines "
+            "without reporting anything. The storage is there and the game will "
+            "not use it.")
         advice.notes.append(
-            "There is no patch route here if it refuses. The flash patcher "
-            "hooks Nintendo's SRAM routines or an EEPROM game that has been "
-            "SRAM-patched, and a flash game has neither. Running the SRAM patch "
-            "first does not help: it rewrites the flash routines in place "
-            "rather than turning them into SRAM ones, so the flash patcher "
-            "then finds nothing to hook.")
-        advice.procedure = _procedure(cart_kind, game_kind, [])
+            "No patch route either. The flash patcher hooks Nintendo's SRAM "
+            "routines or an EEPROM game that has been SRAM-patched, and a flash "
+            "game is neither. SRAM-patching it first does not help: that "
+            "rewrites the flash routines where they stand rather than producing "
+            "SRAM ones, so the flash patcher then finds nothing to hook.")
+        advice.notes.append(
+            "Batteryless does not apply. That payload flushes RAM in the save "
+            "space out to the ROM flash, so it needs a cart with RAM there. "
+            "This cart has a flash chip in the save space instead.")
         return advice
 
     # SRAM game onto a flash cart. One patch, and confirmed working.

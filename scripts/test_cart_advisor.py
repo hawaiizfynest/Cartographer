@@ -93,10 +93,13 @@ def test_1m_game_on_512k_cart_is_blocked_for_space():
     assert a.confidence == ca.BLOCKED
 
 
-def test_512k_game_on_1m_cart_is_an_id_problem_not_a_space_one():
+def test_512k_game_on_1m_cart_is_blocked_by_the_id_check_not_by_space():
+    """Sonic Advance, a FLASH_V126 game, runs on a Macronix MX29L010 cart and
+    saves nothing. The space is there; the game reads the chip id, does not
+    recognise a part from the other size class, and declines silently."""
     a = ca.advise(SAVE_FLASH_1M, SAVE_FLASH_512K)
-    assert a.can_work
-    assert a.confidence == ca.UNPROVEN
+    assert not a.can_work
+    assert a.confidence == ca.BLOCKED
     assert any("id" in n for n in a.notes)
 
 
@@ -108,7 +111,7 @@ def test_512k_game_is_never_sent_through_a_patch_that_cannot_hook_it():
     a = ca.advise(SAVE_FLASH_1M, SAVE_FLASH_512K)
     assert not a.steps, "there is no patch route for a flash game"
     assert not any("Patcher" == s.where for s in a.procedure)
-    assert any("no patch at all" in n for n in a.notes)
+    assert any("No patch route" in n for n in a.notes)
 
 
 def test_eeprom_game_on_sram_cart_is_one_step():

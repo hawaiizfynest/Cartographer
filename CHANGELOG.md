@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.2.9
+
+- A Flash 512K game on a Flash 1M cart is now marked as not working, having been
+  tried: Sonic Advance runs on a Macronix MX29L010 cart and saves nothing at all,
+  silently. The game reads the save chip's id before writing, does not find a
+  part from the size class it expects, and declines. The storage is there and it
+  will not be used, and there is no patch that changes it. This supersedes the
+  advice that shipped one version ago, which was to try it unpatched. Trying it
+  unpatched is how we found out.
+
 ## v1.2.8
 
 - Corrected what the advisor says about a Flash 512K game on a flash cart. It
