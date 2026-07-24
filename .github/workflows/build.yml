@@ -32,6 +32,8 @@ jobs:
         run: python scripts/test_titles.py
       - name: Run verification tests
         run: python scripts/test_verify.py
+      - name: Run save-compare tests
+        run: python scripts/test_savecompare.py
       - name: Run cart-compatibility tests
         run: python scripts/test_cart_compat.py
       - name: Run updater tests
