@@ -98,11 +98,23 @@ def _procedure(cart_kind: str, game_kind: str, patch_steps: list) -> list:
     """
     steps = [Step("Cart", "Insert the cart and set the GBA/GBC voltage switch "
                           "before connecting.")]
-    steps.append(Step("Backup", f"Back up whatever save is on the cart now, "
-                                f"with the override set to {cart_kind}. Keep "
-                                f"that file; the next steps overwrite it."))
+    # The override has to be set before the first backup, not after it. Every
+    # read and write of the save area from here on depends on it, including the
+    # backup that is meant to be the safety net, and a backup taken at the wrong
+    # size is not one.
+    if cart_kind != game_kind:
+        steps.append(Step(
+            "Override", f"Set Tools > Override save type to {cart_kind}, before "
+                        f"touching the save. The game code claims "
+                        f"{label(game_kind)} and everything below reads and "
+                        f"writes the save area at whatever size is set here."))
+    steps.append(Step("Backup", "Back up whatever save is on the cart now. Keep "
+                                "that file; the steps below overwrite it."))
     for step in patch_steps:
-        steps.append(step)
+        # Guard: the override is generated above, at the point it is needed. A
+        # second one arriving through the patch list would contradict it.
+        if step.where != "Override":
+            steps.append(step)
     steps.append(Step("Blank", "Restore a blank save file, all 0xFF and the "
                                "full size of the cart's save area, then read it "
                                "back to confirm. A game handed another game's "
@@ -203,8 +215,31 @@ def advise(cart_kind: str, game_kind: str, chip_name: str = "") -> Advice:
         advice.procedure = _procedure(cart_kind, game_kind, advice.steps)
         return advice
 
-    # EEPROM or SRAM game onto a flash cart. The long way round.
-    if cart_kind in _FLASH_KINDS and game_kind in _EEPROM_KINDS + (SAVE_SRAM_256K,):
+    # SRAM game onto a flash cart. One patch, and confirmed working.
+    if cart_kind in _FLASH_KINDS and game_kind == SAVE_SRAM_256K:
+        # Run end to end on a Flash 1M cart. A 512K cart follows from the same
+        # code: the payload's SRAM path hardcodes its spread and addresses the
+        # same 64 KB window whichever size the chip is, so nothing about it
+        # depends on the capacity. Confirmed is still not the same as tested.
+        advice.confidence = PROVEN if cart_kind == SAVE_FLASH_1M else EXPECTED
+        advice.steps.append(Step(
+            "Patcher", "Flash 512K patch, on the stock ROM. No SRAM patch "
+                       "first; the game already writes the way the payload "
+                       "expects. Leave the load factor on 'let the game "
+                       "decide'."))
+        advice.procedure = _procedure(cart_kind, game_kind, advice.steps)
+        advice.notes.append(
+            "The patcher's log should name WriteSram, ReadSram and VerifySram. "
+            "EEPROM hooks there would mean the ROM is not what it claims to "
+            "be.")
+        advice.notes.append(
+            "A save written this way lands one byte every two across the full "
+            "64 KB, so a dump of the save area reads as spacing 2. Anything "
+            "else is worth looking at even if the game saves.")
+        return advice
+
+    # EEPROM game onto a flash cart. The long way round.
+    if cart_kind in _FLASH_KINDS and game_kind in _EEPROM_KINDS:
         advice.confidence = UNPROVEN
         if game_kind in _EEPROM_KINDS:
             advice.steps.append(Step(
@@ -221,11 +256,6 @@ def advise(cart_kind: str, game_kind: str, chip_name: str = "") -> Advice:
                        f"on 'let the game decide' unless you have a reason "
                        f"not to. This redirects the save writes onto the flash "
                        f"chip through an on-cart payload."))
-        advice.steps.append(Step(
-            "Override", f"Set Tools > Override save type to {cart_kind} and "
-                        f"leave it there. The game code will keep claiming "
-                        f"{label(game_kind)}, so without this a backup comes "
-                        f"off the wrong size."))
         advice.procedure = _procedure(cart_kind, game_kind, advice.steps)
         advice.notes.append(
             "This route has more moving parts than any other. The payload "
@@ -233,6 +263,12 @@ def advise(cart_kind: str, game_kind: str, chip_name: str = "") -> Advice:
             "game reports at boot, and on a cart with no EEPROM nothing "
             "physical answers that, so the figure comes from whatever the SRAM "
             "patch left behind.")
+        advice.notes.append(
+            "Known: the same payload drives these chips correctly for an SRAM "
+            "game, which shares its erase and program routines and asks more "
+            "of the stack, not less. So a failure here is in the EEPROM "
+            "geometry rather than in the flash writing, and the metadata "
+            "pointer the payload reads at run time is the place to look.")
         return advice
 
     # Flash game onto an SRAM or EEPROM cart.
