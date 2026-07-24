@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.2.8
+
+- Corrected what the advisor says about a Flash 512K game on a flash cart. It
+  used to send you through the Flash 512K patch, which cannot work: that patcher
+  hooks Nintendo's SRAM routines or an EEPROM game that has already been
+  SRAM-patched, and a flash game is neither. Running the SRAM patch first does
+  not help either, because it rewrites the flash routines where they stand
+  instead of turning them into SRAM ones, so the flash patcher then finds
+  nothing to hook and refuses. The advice now is to try the game unpatched,
+  since both sides drive flash the same way and the only thing that can stop it
+  is the game not recognising a chip id from the other size class.
+
 ## v1.2.7
 
 - An SRAM game on a flash save cart is now marked as a route that works, having

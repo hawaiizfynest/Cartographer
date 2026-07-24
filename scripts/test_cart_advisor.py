@@ -100,6 +100,17 @@ def test_512k_game_on_1m_cart_is_an_id_problem_not_a_space_one():
     assert any("id" in n for n in a.notes)
 
 
+def test_512k_game_is_never_sent_through_a_patch_that_cannot_hook_it():
+    """The flash patcher hooks Nintendo's SRAM routines or an SRAM-patched
+    EEPROM game. A flash game has neither, and SRAM-patching it first rewrites
+    the flash routines in place rather than producing SRAM ones, so the flash
+    patcher then finds nothing. Suggesting either wastes a cycle."""
+    a = ca.advise(SAVE_FLASH_1M, SAVE_FLASH_512K)
+    assert not a.steps, "there is no patch route for a flash game"
+    assert not any("Patcher" == s.where for s in a.procedure)
+    assert any("no patch at all" in n for n in a.notes)
+
+
 def test_eeprom_game_on_sram_cart_is_one_step():
     a = ca.advise(SAVE_SRAM_256K, SAVE_EEPROM_64K)
     assert a.confidence == ca.EXPECTED

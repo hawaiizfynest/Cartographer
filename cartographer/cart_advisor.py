@@ -204,15 +204,18 @@ def advise(cart_kind: str, game_kind: str, chip_name: str = "") -> Advice:
             return advice
         advice.confidence = UNPROVEN
         advice.notes.append(
-            "The game expects a 512K part and this cart holds a 1M one. A game "
-            "checks the save chip's id before writing and will not recognise a "
-            "chip from the other size class, so it refuses even though the "
-            "space exists.")
-        advice.steps.append(Step(
-            "Patcher", "Flash 512K patch, with the load factor left on 'let "
-                       "the game decide'. Its payload drives the chip directly "
-                       "instead of consulting the id the game objects to."))
-        advice.procedure = _procedure(cart_kind, game_kind, advice.steps)
+            "The game expects a 512K part and this cart holds a 1M one. Both "
+            "drive flash the same way, so try it with no patch at all first. "
+            "The only thing that can stop it is the game reading the chip id "
+            "and not recognising a part from the other size class.")
+        advice.notes.append(
+            "There is no patch route here if it refuses. The flash patcher "
+            "hooks Nintendo's SRAM routines or an EEPROM game that has been "
+            "SRAM-patched, and a flash game has neither. Running the SRAM patch "
+            "first does not help: it rewrites the flash routines in place "
+            "rather than turning them into SRAM ones, so the flash patcher "
+            "then finds nothing to hook.")
+        advice.procedure = _procedure(cart_kind, game_kind, [])
         return advice
 
     # SRAM game onto a flash cart. One patch, and confirmed working.
