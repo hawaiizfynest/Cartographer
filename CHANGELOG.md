@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.2.5
+
+- Added Flash 512K patch to the patcher window, so a game can be taken all the
+  way to a flash save cart without leaving Cartographer. This is a port of
+  metroid-maniac's gba-flash-patcher, and its output is byte-identical to
+  gba-flash.exe 0.0.2 on the same ROM, checked against a real 4 MB one rather
+  than taken on trust.
+- The flash patch can override how widely the payload spreads a save. Normally
+  the game decides, from the EEPROM size it reports at boot. A cart with no
+  EEPROM has nothing real to report, so that figure comes from whatever the
+  SRAM patch left behind, and the wrong answer produces a save the game writes
+  and then cannot read. The setting makes that testable in one flash cycle
+  instead of guesswork.
+- The batteryless-only settings in the patcher no longer look like they apply to
+  both buttons. The SRAM-patch-first checkbox and the flush mode radios feed the
+  batteryless chain and are ignored by SRAM patch only, but they sat loose above
+  the buttons where they read as settings for whichever one you pressed. They
+  are now grouped under a heading that says which button uses them.
+
 ## v1.2.4
 
 - Renamed the button that opens the patcher. It said "GBA batteryless patch",

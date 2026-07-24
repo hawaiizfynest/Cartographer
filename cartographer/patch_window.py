@@ -14,11 +14,13 @@ import os
 
 from PyQt6.QtWidgets import (
     QButtonGroup, QCheckBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout,
-    QLabel, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout,
+    QComboBox, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
+    QVBoxLayout,
 )
 
 from . import bl_patcher as blp
 from . import pipeline
+from . import flash_patcher
 from . import sram_patcher
 
 
@@ -60,28 +62,55 @@ class PatchDialog(QDialog):
         self.lbl_detect.setWordWrap(True)
         lay.addWidget(self.lbl_detect)
 
+        # Both of these feed the batteryless chain and nothing else. SRAM patch
+        # only ignores them entirely, so they sit under one heading that says so
+        # rather than floating above the buttons looking like settings for
+        # whichever one gets pressed.
+        bl_box = QGroupBox("Batteryless options (used by Prepare ROM only)")
+        blrow = QVBoxLayout(bl_box)
         self.chk_sram = QCheckBox(
             "SRAM-patch first (required for Flash/EEPROM save games)")
         self.chk_sram.setChecked(True)
-        lay.addWidget(self.chk_sram)
+        blrow.addWidget(self.chk_sram)
 
-        mode_box = QGroupBox("Flush mode")
-        mrow = QVBoxLayout(mode_box)
         self.rb_auto = QRadioButton(
-            "Auto \u2014 save written back a few seconds after each in-game save")
+            "Flush: auto \u2014 save written back a few seconds after each "
+            "in-game save")
         self.rb_keypad = QRadioButton(
-            "Keypad \u2014 flush on demand with L+R+Start+Select (more compatible)")
+            "Flush: keypad \u2014 on demand with L+R+Start+Select (more "
+            "compatible)")
         self.rb_auto.setChecked(True)
         grp = QButtonGroup(self)
         grp.addButton(self.rb_auto)
         grp.addButton(self.rb_keypad)
-        mrow.addWidget(self.rb_auto)
-        mrow.addWidget(self.rb_keypad)
-        lay.addWidget(mode_box)
+        blrow.addWidget(self.rb_auto)
+        blrow.addWidget(self.rb_keypad)
+        lay.addWidget(bl_box)
+
+        fl_box = QGroupBox("Flash save patch (used by Flash 512K patch only)")
+        flrow = QVBoxLayout(fl_box)
+        self.cmb_lf = QComboBox()
+        self.cmb_lf.addItem("Let the game decide (matches gba-flash.exe)", None)
+        self.cmb_lf.addItem("Force spread for a 512-byte save (load factor 7)", 7)
+        self.cmb_lf.addItem("Force packed for an 8 KB save (load factor 3)", 3)
+        self.cmb_lf.setToolTip(
+            "How widely the on-cart payload spreads a save across the flash. "
+            "The game normally decides from the EEPROM size it reports, which "
+            "on a cart with no EEPROM is whatever the SRAM patch left behind.")
+        flrow.addWidget(self.cmb_lf)
+        lay.addWidget(fl_box)
 
         arow = QHBoxLayout()
+        self.btn_flash = QPushButton("Flash 512K patch\u2026")
+        self.btn_flash.setEnabled(False)
+        self.btn_flash.setToolTip(
+            "Patch the game to save on a flash chip. Run this after an SRAM "
+            "patch for EEPROM games.")
+        self.btn_flash.clicked.connect(self.do_flash_patch)
+        arow.addWidget(self.btn_flash)
         self.btn_sram = QPushButton("SRAM patch only\u2026")
         self.btn_sram.setEnabled(False)
+        self.btn_flash.setEnabled(False)
         self.btn_sram.setToolTip(
             "Apply just the SRAM step and stop. Use this when another tool is "
             "going to do the next stage, such as a flash-save patcher.")
@@ -92,6 +121,7 @@ class PatchDialog(QDialog):
         self.btn_patch.setObjectName("primary")
         self.btn_patch.setEnabled(False)
         self.btn_sram.setEnabled(False)
+        self.btn_flash.setEnabled(False)
         self.btn_patch.clicked.connect(self.do_patch)
         arow.addWidget(self.btn_patch)
         lay.addLayout(arow)
@@ -111,6 +141,7 @@ class PatchDialog(QDialog):
         self.lbl_file.setText(os.path.basename(path))
         self.btn_patch.setEnabled(True)
         self.btn_sram.setEnabled(True)
+        self.btn_flash.setEnabled(True)
         try:
             data = open(path, "rb").read()
         except OSError as exc:
@@ -132,6 +163,52 @@ class PatchDialog(QDialog):
                 f"{title}: no Flash/EEPROM signature (native SRAM or unknown) "
                 f"\u2014 SRAM patch not needed.")
             self.chk_sram.setChecked(False)
+
+    def do_flash_patch(self) -> None:
+        """Patch the ROM to save on a flash chip."""
+        try:
+            data = open(self.rom_path, "rb").read()
+        except OSError as exc:
+            QMessageBox.critical(self, "Patch", f"Cannot read ROM:\n{exc}")
+            return
+        factor = self.cmb_lf.currentData()
+        try:
+            result = flash_patcher.patch_rom(data, force_loadfactor=factor)
+        except flash_patcher.FlashPatchError as exc:
+            self.log.appendPlainText(f"\u2717 {exc}")
+            QMessageBox.warning(self, "Flash patch failed", str(exc))
+            return
+
+        base, _ = os.path.splitext(self.rom_path)
+        out, _ = QFileDialog.getSaveFileName(
+            self, "Save flash-patched ROM", base + "_flash512.gba",
+            "GBA ROM (*.gba)")
+        if not out:
+            return
+        try:
+            with open(out, "wb") as f:
+                f.write(result.data)
+        except OSError as exc:
+            QMessageBox.critical(self, "Patch", f"Cannot write output:\n{exc}")
+            return
+
+        self.log.appendPlainText(
+            f"\u2713 Flash 512K patch. Payload installed at "
+            f"0x{result.payload_base:06X}, {flash_patcher.PAYLOAD_LEN} bytes.")
+        for name, off, target in result.hooks:
+            where = f" -> 0x{target:08X}" if target else ""
+            self.log.appendPlainText(f"    {name} at 0x{off:X}{where}")
+        if result.forced_loadfactor is not None:
+            self.log.appendPlainText(
+                f"    Load factor forced to {result.forced_loadfactor}, so the "
+                f"game's own EEPROM geometry is ignored.")
+        elif result.eeprom_meta_addr:
+            self.log.appendPlainText(
+                f"    EEPROM geometry read from RAM at "
+                f"0x{result.eeprom_meta_addr:07X} at run time.")
+        if result.expanded:
+            self.log.appendPlainText("    ROM was expanded to fit the payload.")
+        self.log.appendPlainText(f"  Wrote {os.path.basename(out)}")
 
     def do_sram_only(self) -> None:
         """Apply the SRAM step by itself and stop.
