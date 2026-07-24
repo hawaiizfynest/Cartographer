@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.2.6
+
+- The advisor gives the whole procedure, not just the route. Backing up what is
+  already on the cart, blanking the save area, setting the override so a backup
+  comes off the right size, and what to look at afterwards are the steps that
+  actually get skipped, and each one costs a full cycle to discover. They are
+  now numbered in order alongside the patch steps, tagged with where each one
+  happens.
+- Added Tools > What does this game need on this cart? It reads the cart's save
+  chip, reads the game's save type, and says what has to happen between them:
+  nothing, one patch, two, or that the pairing cannot work. Each answer carries
+  how well established it is, because some routes have been run end to end and
+  some only ought to work, and presenting those with equal confidence is how
+  people end up chasing a fault that was never there.
+  The existing compatibility view answers which cart to buy for a game. This
+  answers the question you have once the cart is in your hand, which needed the
+  save chip id to be readable before it could be answered at all: a repro cart's
+  game code describes whichever ROM is on it, never the board.
+
 ## v1.2.5
 
 - Added Flash 512K patch to the patcher window, so a game can be taken all the

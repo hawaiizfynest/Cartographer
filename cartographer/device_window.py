@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import __app_name__, __version__
+from . import cart_advisor
 from . import flash_db
 from . import gb_header as gbh
 from . import gbxcart as gx
@@ -116,6 +117,9 @@ class DeviceWindow(QMainWindow):
         act_rom_tools = tools_menu.addAction(
             "ROM and save tools (patches, cheats, compare saves)\u2026")
         act_rom_tools.triggered.connect(self.on_rom_tools)
+        act_advise = tools_menu.addAction(
+            "What does this game need on this cart?\u2026")
+        act_advise.triggered.connect(self.on_advise)
         act_save_editor = tools_menu.addAction("Save editor (view and edit)\u2026")
         act_save_editor.triggered.connect(self.on_save_editor)
         act_save_override = tools_menu.addAction("Override save type\u2026")
@@ -794,6 +798,65 @@ class DeviceWindow(QMainWindow):
                      f"and restore will use it instead of the detected type "
                      f"({detected}). It is remembered between launches.")
         self._refresh_save_label()
+
+    def on_advise(self) -> None:
+        """Say what a chosen game needs to save on the cart that is plugged in.
+
+        Reads the save chip rather than trusting the game code, because on a
+        repro cart the game code describes whichever ROM is loaded and not the
+        board the save chip sits on.
+        """
+        if not self._is_gba():
+            QMessageBox.information(
+                self, __app_name__,
+                "This applies to GBA carts. Set the switch to GBA with the "
+                "cart inserted.")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose the game you want on this cart", "",
+            "GBA ROM (*.gba);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "rb") as handle:
+                header = handle.read(0xC0)
+        except OSError as exc:
+            QMessageBox.critical(self, __app_name__, f"Cannot read ROM:\n{exc}")
+            return
+        game_code = header[0xAC:0xB0].decode("ascii", "replace")
+        game_kind = titles.save_type_for_code(game_code) or ""
+
+        self.log("Reading the save chip to see what this cart provides\u2026")
+
+        def job(progress, log, cancel):
+            data = self.dev.gba_save_flash_id()
+            chip_name = ""
+            cart_kind = ""
+            if len(data) >= 2:
+                chip_id = data[0] | (data[1] << 8)
+                known = flash_db.lookup_save_flash(chip_id)
+                if known:
+                    chip_name = known[0]
+                cart_kind = cart_advisor.cart_kind_from_chip(chip_id)
+            advice = cart_advisor.advise(cart_kind, game_kind, chip_name)
+
+            log(f"Cart provides: {advice.cart_summary}")
+            log(f"{os.path.basename(path)} ({game_code}) wants: "
+                f"{advice.game_summary}")
+            log(cart_advisor.CONFIDENCE_TEXT[advice.confidence])
+            if not advice.can_work:
+                pass
+            elif advice.procedure:
+                log("Procedure:")
+                for i, step in enumerate(advice.procedure, 1):
+                    log(f"  {i}. [{step.where}] {step.text}")
+            if advice.can_work and not advice.steps:
+                log("No patching needed for this pairing.")
+            for note in advice.notes:
+                log(f"  {note}")
+
+        self._start(job, "Advice complete.")
 
     def on_identify_save_chip(self) -> None:
         """Read the save flash chip's id and say whether games will know it."""

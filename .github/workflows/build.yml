@@ -28,6 +28,8 @@ jobs:
         run: python scripts/test_sram_patcher.py
       - name: Run flash patcher tests
         run: python scripts/test_flash_patcher.py
+      - name: Run cart advisor tests
+        run: python scripts/test_cart_advisor.py
       - name: Run GBxCart device protocol tests
         run: python scripts/test_gbxcart.py
       - name: Run title-resolver tests
